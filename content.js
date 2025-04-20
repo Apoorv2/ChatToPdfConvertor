@@ -857,4 +857,380 @@ function extractConversation() {
     console.error("Error extracting conversation:", error);
     return { error: error.toString() };
   }
+}
+
+/**
+ * Extract images from the conversation and convert to data URLs using canvas
+ * This bypasses CORS restrictions by using images already loaded in the DOM
+ * @param {Element} container - The message container to search for images
+ * @returns {Promise<Array>} - Array of image data URLs
+ */
+async function extractImages(container) {
+  try {
+    // Find all images in the container
+    const images = container.querySelectorAll('img');
+    console.log(`Found ${images.length} images in container`);
+    
+    // Limit to 5 images per message for performance (as specified in requirements)
+    const imageLimit = 5;
+    const processedImages = [];
+    
+    // Process each image, up to the limit
+    for (let i = 0; i < Math.min(images.length, imageLimit); i++) {
+      const img = images[i];
+      
+      // Skip tiny images or icons
+      if (img.width < 50 || img.height < 50) {
+        console.log(`Skipping small image: ${img.width}x${img.height}`);
+        continue;
+      }
+      
+      try {
+        // Wait for image to be fully loaded
+        if (!img.complete) {
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            // Set a timeout in case image never loads
+            setTimeout(reject, 3000);
+          });
+        }
+        
+        // Create canvas and draw image to generate data URL
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        
+        // Draw image to canvas
+        ctx.drawImage(img, 0, 0);
+        
+        // Try to get data URL (may fail due to CORS)
+        try {
+          const dataURL = canvas.toDataURL('image/jpeg', 0.85); // Slightly compressed for performance
+          
+          // Check if dataURL is valid (not empty or error)
+          if (dataURL && dataURL.length > 100) {
+            processedImages.push({
+              type: 'image',
+              dataURL: dataURL,
+              width: img.width,
+              height: img.height,
+              alt: img.alt || 'ChatGPT image'
+            });
+            console.log(`Successfully extracted image ${i+1}/${images.length}`);
+          } else {
+            console.warn(`Empty or invalid data URL for image ${i+1}`);
+          }
+        } catch (canvasError) {
+          console.warn(`Skipping tainted image due to CORS: ${canvasError.message}`);
+        }
+      } catch (imageError) {
+        console.warn(`Error processing image ${i+1}: ${imageError.message}`);
+      }
+    }
+    
+    console.log(`Successfully processed ${processedImages.length} images`);
+    return processedImages;
+  } catch (error) {
+    console.error("Error extracting images:", error);
+    return [];
+  }
+}
+
+/**
+ * Global set to track all equations across the entire conversation
+ * This helps prevent duplicates across different messages
+ */
+const globalSeenEquations = new Set();
+
+/**
+ * Extract equations from text content with improved deduplication
+ */
+function extractEquationsAndText(container, textContent) {
+  try {
+    // Items will store text and equations in order
+    const items = [];
+    
+    // For deduplicating text within this element
+    const seenText = new Set();
+    
+    // Clean and normalize the text content first
+    textContent = normalizeTextContent(textContent);
+    
+    // LaTeX regex pattern as specified in the requirements
+    const latexRegex = /\$\$([^\$]+)\$\$|\$([^\$]+)\$|\\\[([^\]]+)\\\]|\\\((\S.*?\S)\\\)|\`{3}latex\n([\s\S]*?)\n\`{3}/g;
+    
+    // Process the text content first with regex
+    let lastIndex = 0;
+    let match;
+    
+    // Find all LaTeX matches in the text
+    while ((match = latexRegex.exec(textContent))) {
+      // Get the equation (one of the capture groups will have it)
+      const equation = match[1] || match[2] || match[3] || match[4] || match[5];
+      const startIndex = match.index;
+      
+      // Add text that comes before this equation
+      if (startIndex > lastIndex) {
+        const textBefore = textContent.slice(lastIndex, startIndex).trim();
+        if (textBefore && !seenText.has(textBefore)) {
+          items.push({ type: 'text', content: textBefore });
+          seenText.add(textBefore);
+        }
+      }
+      
+      // Add the equation only if we haven't seen it globally
+      if (equation && equation.trim()) {
+        const normalizedEq = normalizeEquation(equation.trim());
+        if (!globalSeenEquations.has(normalizedEq)) {
+          items.push({ type: 'equation', content: equation.trim() });
+          globalSeenEquations.add(normalizedEq);
+        }
+      }
+      
+      // Update lastIndex to after this match
+      lastIndex = latexRegex.lastIndex;
+    }
+    
+    // Add any remaining text after the last equation
+    if (lastIndex < textContent.length) {
+      const remainingText = textContent.slice(lastIndex).trim();
+      if (remainingText && !seenText.has(remainingText)) {
+        items.push({ type: 'text', content: remainingText });
+        seenText.add(remainingText);
+      }
+    }
+    
+    // Now look for rendered KaTeX elements in the DOM
+    const katexElements = container.querySelectorAll('.katex, .katex-display');
+    
+    // Limit to 10 equations as per requirements
+    const equationLimit = 10;
+    
+    // Process KaTeX elements
+    katexElements.forEach(katex => {
+      // Skip if we've reached the global equation limit
+      if (globalSeenEquations.size >= equationLimit) return;
+      
+      // Try to get the LaTeX source if available
+      const latex = katex.querySelector('.katex-mathml annotation[encoding="application/x-tex"]');
+      
+      if (latex && latex.textContent) {
+        const normalizedEq = normalizeEquation(latex.textContent.trim());
+        // Add only if we haven't seen this equation before globally
+        if (!globalSeenEquations.has(normalizedEq)) {
+          items.push({ 
+            type: 'equation', 
+            content: latex.textContent.trim(),
+            isRendered: true
+          });
+          globalSeenEquations.add(normalizedEq);
+        }
+      } 
+      // Fallback to the rendered text if we can't find LaTeX source
+      else if (katex.textContent && katex.textContent.trim().length > 0) {
+        const normalizedEq = normalizeEquation(katex.textContent.trim());
+        // Add only if we haven't seen this equation before globally
+        if (!globalSeenEquations.has(normalizedEq)) {
+          items.push({
+            type: 'equation',
+            content: katex.textContent.trim(),
+            isRendered: true
+          });
+          globalSeenEquations.add(normalizedEq);
+        }
+      }
+    });
+    
+    // Filter out empty items and return
+    return items.filter(item => item.content && item.content.trim().length > 0);
+  } catch (error) {
+    console.error("Error extracting equations:", error);
+    // Fallback to just returning the text if equation extraction fails
+    return [{ type: 'text', content: textContent }];
+  }
+}
+
+/**
+ * Normalize text content to improve deduplication and fix variable notation
+ */
+function normalizeTextContent(text) {
+  if (!text) return '';
+  
+  // Fix repeated characters in variable names (FFF → F, etc.)
+  text = text.replace(/([A-Za-z])\1{2,}/g, '$1');
+  
+  return text;
+}
+
+/**
+ * Normalize equation text to help with duplicate detection
+ */
+function normalizeEquation(equation) {
+  if (!equation) return '';
+  
+  // Fix repeated characters in variable names first (FFF → F, etc.)
+  equation = equation.replace(/([A-Za-z])\1{2,}/g, '$1');
+  
+  // Remove all whitespace
+  let normalized = equation.replace(/\s+/g, '');
+  
+  // Replace common equivalent notations
+  normalized = normalized
+    .replace(/\\frac/g, '') // Remove \frac command
+    .replace(/\{|\}/g, '')  // Remove curly braces
+    .replace(/\\left|\\right/g, '') // Remove \left and \right
+    .replace(/\\text\{[^}]*\}/g, ''); // Remove \text{} commands
+    
+  return normalized;
+}
+
+/**
+ * Extract content directly from ChatGPT page, with enhanced image and equation support
+ */
+async function extractChatGPTContent() {
+  // This runs in the page context
+  console.log("Extracting ChatGPT content with enhanced image and equation support");
+  
+  // Reset global equation tracking for a fresh extraction
+  globalSeenEquations.clear();
+  
+  // Initialize conversation object
+  const conversation = {
+    title: document.title,
+    messages: []
+  };
+  
+  try {
+    // Try different selectors for message blocks to support both domains
+    const selectors = [
+      '[data-testid="conversation-turn"]',
+      '.text-message-content',
+      '[data-message-author-role]',
+      '.ProseMirror',
+      '.text-base'
+    ];
+    
+    // Try each selector until we find conversation elements
+    let messageBlocks = [];
+    for (const selector of selectors) {
+      messageBlocks = document.querySelectorAll(selector);
+      console.log(`Selector "${selector}" found ${messageBlocks.length} elements`);
+      if (messageBlocks.length > 0) break;
+    }
+    
+    // Process message blocks if found
+    if (messageBlocks.length > 0) {
+      // Create an array of promises for async processing
+      const messagePromises = Array.from(messageBlocks).map(async (block, i) => {
+        try {
+          // Determine if user or AI message
+          const isUser = 
+            block.getAttribute('data-message-author-role') === 'user' || 
+            block.querySelector('[data-testid="not-chat-gpt-user-message"]') !== null ||
+            (block.closest('[data-testid="conversation-turn-"]') && 
+              i % 2 === 0);
+          
+          const speaker = isUser ? 'You' : 'ChatGPT';
+          
+          // Initialize items array for this message
+          const items = [];
+          
+          // Process text content for equations
+          // First try structured elements
+          const textElements = block.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
+          textElements.forEach(el => {
+            if (el.textContent.trim()) {
+              // Extract equations and text from this element
+              const extractedItems = extractEquationsAndText(el, el.textContent.trim());
+              items.push(...extractedItems);
+            }
+          });
+          
+          // If no structured elements, try direct text
+          if (items.filter(i => i.type === 'text').length === 0 && block.textContent.trim()) {
+            // Extract from whole block text
+            const extractedItems = extractEquationsAndText(block, block.textContent.trim());
+            items.push(...extractedItems);
+          }
+          
+          // Extract tables
+          const tables = block.querySelectorAll('table');
+          tables.forEach(table => {
+            // Extract table data
+            const tableData = {
+              headers: [],
+              rows: []
+            };
+            
+            // Get table headers
+            const headerRow = table.querySelector('thead tr');
+            if (headerRow) {
+              const headers = headerRow.querySelectorAll('th');
+              headers.forEach(header => {
+                tableData.headers.push(header.textContent.trim());
+              });
+            }
+            
+            // Get table rows
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach(row => {
+              const rowData = [];
+              const cells = row.querySelectorAll('td');
+              cells.forEach(cell => {
+                rowData.push(cell.textContent.trim());
+              });
+              if (rowData.length > 0) {
+                tableData.rows.push(rowData);
+              }
+            });
+            
+            // Add table to items if it has data
+            if (tableData.rows.length > 0) {
+              items.push({
+                type: 'table',
+                content: tableData
+              });
+            }
+          });
+          
+          // Extract images
+          const images = await extractImages(block);
+          items.push(...images);
+          
+          // Return the completed message object
+          return {
+            speaker: speaker,
+            items: items
+          };
+        } catch (err) {
+          console.error(`Error processing message block ${i}:`, err);
+          return null;
+        }
+      });
+      
+      // Wait for all message processing to complete
+      const processedMessages = await Promise.all(messagePromises);
+      
+      // Add all valid messages to the conversation
+      conversation.messages = processedMessages.filter(message => message && message.items && message.items.length > 0);
+    }
+    
+    console.log(`Extraction complete. Found ${conversation.messages.length} messages`);
+    return conversation;
+    
+  } catch (error) {
+    console.error("Error in extraction:", error);
+    return {
+      title: document.title,
+      messages: [{
+        speaker: 'Error',
+        items: [{
+          type: 'text',
+          content: 'Error extracting content: ' + error.message
+        }]
+      }]
+    };
+  }
 } 

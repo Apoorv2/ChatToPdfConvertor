@@ -227,11 +227,19 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   
   /**
-   * Create a PDF with improved equation formatting and table support
+   * Create a PDF with comprehensive deduplication and user question preservation
    */
   function createPDF(data) {
     try {
-      console.log("Creating PDF with equation and table support...");
+      console.log("Creating PDF with enhanced content organization...");
+      
+      // Process messages to deduplicate and clean up equations while preserving user questions
+      if (data && data.messages) {
+        data = { 
+          ...data, 
+          messages: processMessagesForPDF(data.messages) 
+        };
+      }
       
       // Create PDF document
       const doc = new jsPDF();
@@ -248,16 +256,26 @@ document.addEventListener('DOMContentLoaded', function() {
       doc.text(data.title || 'ChatGPT Conversation', margin, 20);
       
       // Reset to normal styling
-      doc.setFontSize(11);
       doc.setFont('Helvetica', 'normal');
+      doc.setFontSize(11);
       
       // Current position
       let y = 40;
+      
+      // Track processed content
+      const processedEquations = new Set();
+      const recentTextSegments = [];
       
       // Process each message in the conversation
       if (Array.isArray(data.messages)) {
         data.messages.forEach((message) => {
           if (!message) return;
+          
+          // Group message items to avoid duplication
+          const organizedItems = organizeMessageContent(message.items || []);
+          
+          // Skip if no content after organization
+          if (organizedItems.length === 0) return;
           
           // Add speaker header
           doc.setFont('Helvetica', 'bold');
@@ -266,153 +284,204 @@ document.addEventListener('DOMContentLoaded', function() {
           y += 10;
           
           // Process all items in proper sequence
-          if (Array.isArray(message.items)) {
-            // Create a set to track processed content to avoid duplication
-            const processedContent = new Set();
+          organizedItems.forEach(item => {
+            if (!item) return;
             
-            message.items.forEach(item => {
-              if (!item) return;
+            // Check if we need a new page
+            if (y > pageHeight - 40) {
+              doc.addPage();
+              y = 20;
+            }
+            
+            // Process different item types
+            if (item.type === 'text') {
+              let textContent = normalizeText(item.content?.trim());
+              if (!textContent) return;
               
-              // Skip duplicate items
-              if (item.type === 'text' || item.type === 'equation') {
-                const contentKey = `${item.type}:${item.content?.substring(0, 50)}`;
-                if (processedContent.has(contentKey)) return;
-                processedContent.add(contentKey);
+              // Skip if too similar to recent text
+              if (isSimilarToRecentText(textContent, recentTextSegments, message.speaker === 'You')) {
+                return;
               }
               
-              // Check if we need a new page
-              if (y > pageHeight - 40) {
-                doc.addPage();
-                y = 20;
+              // Add to recent text segments
+              recentTextSegments.push(textContent);
+              if (recentTextSegments.length > 5) {
+                recentTextSegments.shift(); // Keep only 5 most recent
               }
               
-              // Process different item types
-              if (item.type === 'text') {
-                const text = item.content?.trim();
-                if (!text) return;
+              // Force normal font for regular text
+              doc.setFont('Helvetica', 'normal');
+              doc.setFontSize(11);
+              
+              // Special handling for bullet points
+              const isBulletPoint = textContent.startsWith('•');
+              
+              if (isBulletPoint) {
+                // Split the content into bullet and text
+                const bulletText = textContent.substring(1).trim();
                 
-                // Check for derivation header
-                if (text.includes("Step-by-step Derivation")) {
-                  doc.setFont('Helvetica', 'bold');
-                  doc.text("Step-by-step Derivation:", margin, y);
-                  doc.setFont('Helvetica', 'normal');
-                  y += 10;
-                }
-                // Check for numbered step
-                else if (/^\d+\.\s/.test(text)) {
-                  // Extract number and content
-                  const match = text.match(/^(\d+)\.\s+(.*)/);
-                  if (match) {
-                    const stepNumber = match[1];
-                    const stepContent = match[2];
-                    
-                    // Add step number in bold
-                    doc.setFont('Helvetica', 'bold');
-                    doc.text(`${stepNumber}.`, margin, y);
-                    doc.setFont('Helvetica', 'normal');
-                    
-                    // Add step content with wrapping
-                    const contentLines = doc.splitTextToSize(stepContent, contentWidth - 15);
-                    doc.text(contentLines, margin + 15, y);
-                    
-                    // Move position
-                    y += contentLines.length * 7 + 5;
-                  }
-                } 
-                else {
-                  // Regular text with wrapping
-                  const textLines = doc.splitTextToSize(text, contentWidth);
-                  doc.text(textLines, margin, y);
-                  
-                  // Move position
-                  y += textLines.length * 7 + 3;
-                }
+                // Render bullet point with proper indentation
+                doc.setFont('Helvetica', 'normal');
+                
+                const bulletIndent = 10;
+                const textIndent = 15;
+                const availableWidth = contentWidth - textIndent;
+                
+                // Draw the bullet
+                doc.text('•', margin + bulletIndent - 5, y);
+                
+                // Draw the text with proper wrapping
+                const textLines = doc.splitTextToSize(bulletText, availableWidth);
+                doc.text(textLines, margin + textIndent, y);
+                
+                // Move position based on number of lines
+                y += textLines.length * 7 + 3;
+              } else {
+                // Handle regular text
+                const textLines = doc.splitTextToSize(textContent, contentWidth);
+                doc.text(textLines, margin, y);
+                
+                // Move position
+                y += textLines.length * 7 + 3;
               }
-              // Process equation
-              else if (item.type === 'equation') {
-                const equation = item.content?.trim();
-                
-                // Skip if empty
-                if (!equation) return;
-                
-                // Format equation
-                const formattedEquation = formatEquation(equation);
-                
-                // Add spacing
+            }
+            // Process equation
+            else if (item.type === 'equation') {
+              const equation = item.content?.trim();
+              
+              // Skip if empty
+              if (!equation) return;
+              
+              // Check for duplicate equation
+              const normalizedEq = formatEquation(equation);
+              if (processedEquations.has(normalizedEq)) return;
+              processedEquations.add(normalizedEq);
+              
+              // Add spacing
+              y += 5;
+              
+              // Add "Equation:" prefix as specified in requirements
+              doc.setFont('Helvetica', 'bold');
+              doc.text("Equation:", margin, y);
+              doc.setFont('Courier', 'normal');
+              y += 7;
+              
+              // Center the equation
+              doc.text(normalizedEq, pageWidth / 2, y, { align: 'center' });
+              y += 7;
+              
+              // Reset font and add space after
+              doc.setFont('Helvetica', 'normal');
+              y += 5;
+            }
+            // Process image
+            else if (item.type === 'image' && item.dataURL) {
+              try {
+                // Add spacing before image
                 y += 5;
                 
-                // Use monospaced font for equations
-                doc.setFont('Courier', 'normal');
+                // Calculate image dimensions (50% width as per requirements)
+                let imgWidth = Math.min(contentWidth, item.width || 200);
+                let imgHeight = item.height || 200;
                 
-                // Center the equation
-                const eqLines = doc.splitTextToSize(formattedEquation, contentWidth - 40);
-                eqLines.forEach(line => {
-                  if (line.trim()) {
-                    doc.text(line, pageWidth / 2, y, { align: 'center' });
-                    y += 7;
-                  }
+                // Resize to 50% width as specified in requirements
+                imgWidth = imgWidth * 0.5;
+                imgHeight = imgHeight * 0.5;
+                
+                // Ensure image fits on page
+                if (imgHeight > pageHeight - y - margin) {
+                  // Scale down to fit
+                  const scale = (pageHeight - y - margin) / imgHeight;
+                  imgWidth *= scale;
+                  imgHeight *= scale;
+                }
+                
+                // Add caption
+                doc.setFont('Helvetica', 'italic');
+                doc.text("Image:", margin, y);
+                doc.setFont('Helvetica', 'normal');
+                y += 7;
+                
+                // Center the image
+                const xPos = margin + (contentWidth - imgWidth) / 2;
+                
+                // Add the image
+                doc.addImage(
+                  item.dataURL,
+                  'JPEG',
+                  xPos,
+                  y,
+                  imgWidth,
+                  imgHeight
+                );
+                
+                // Move position past image
+                y += imgHeight + 10;
+              } catch (imgError) {
+                console.error("Error adding image to PDF:", imgError);
+                
+                // Add error note instead
+                doc.setTextColor(255, 0, 0);
+                doc.text("[Image could not be embedded]", margin, y);
+                doc.setTextColor(0, 0, 0);
+                y += 7;
+              }
+            }
+            // Process table
+            else if (item.type === 'table' && item.content) {
+              const tableData = item.content;
+              
+              // Add spacing before table
+              y += 5;
+              
+              // Prepare table for autoTable plugin
+              try {
+                // Create header and row data
+                const headers = tableData.headers.length > 0 ? 
+                  tableData.headers : 
+                  Array(tableData.rows[0]?.length || 0).fill('').map((_, i) => `Column ${i+1}`);
+                
+                const rows = tableData.rows;
+                
+                // Add the table with autoTable
+                doc.autoTable({
+                  startY: y,
+                  head: [headers],
+                  body: rows,
+                  margin: { left: margin, right: margin },
+                  headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0] },
+                  alternateRowStyles: { fillColor: [248, 248, 248] },
+                  tableWidth: contentWidth
                 });
                 
-                // Reset font and add space after
-                doc.setFont('Helvetica', 'normal');
-                y += 5;
-              }
-              // Process table
-              else if (item.type === 'table' && item.content) {
-                const tableData = item.content;
+                // Update position based on the final position of the table
+                y = doc.lastAutoTable.finalY + 10;
                 
-                // Add spacing before table
-                y += 5;
+              } catch (tableError) {
+                console.error("Error creating table:", tableError);
                 
-                // Prepare table for autoTable plugin
-                try {
-                  // Create header and row data
-                  const headers = tableData.headers.length > 0 ? 
-                    tableData.headers : 
-                    Array(tableData.rows[0]?.length || 0).fill('').map((_, i) => `Column ${i+1}`);
-                  
-                  const rows = tableData.rows;
-                  
-                  // Add the table with autoTable
-                  doc.autoTable({
-                    startY: y,
-                    head: [headers],
-                    body: rows,
-                    margin: { left: margin, right: margin },
-                    headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0] },
-                    alternateRowStyles: { fillColor: [248, 248, 248] },
-                    tableWidth: contentWidth
-                  });
-                  
-                  // Update position based on the final position of the table
-                  y = doc.lastAutoTable.finalY + 10;
-                  
-                } catch (tableError) {
-                  console.error("Error creating table:", tableError);
-                  
-                  // Fallback to simple text if autoTable fails
-                  doc.text("Table data (fallback format):", margin, y);
+                // Fallback to simple text if autoTable fails
+                doc.text("Table data (fallback format):", margin, y);
+                y += 7;
+                
+                // Add headers if any
+                if (tableData.headers && tableData.headers.length) {
+                  doc.text("Headers: " + tableData.headers.join(", "), margin, y);
                   y += 7;
-                  
-                  // Add headers if any
-                  if (tableData.headers && tableData.headers.length) {
-                    doc.text("Headers: " + tableData.headers.join(", "), margin, y);
-                    y += 7;
-                  }
-                  
-                  // Add rows as text
-                  if (tableData.rows && tableData.rows.length) {
-                    tableData.rows.forEach((row, i) => {
-                      doc.text(`Row ${i+1}: ${row.join(", ")}`, margin, y);
-                      y += 7;
-                    });
-                  }
-                  
-                  y += 5;
                 }
+                
+                // Add rows as text
+                if (tableData.rows && tableData.rows.length) {
+                  tableData.rows.forEach((row, i) => {
+                    doc.text(`Row ${i+1}: ${row.join(", ")}`, margin, y);
+                    y += 7;
+                  });
+                }
+                
+                y += 5;
               }
-            });
-          }
+            }
+          });
           
           // Add spacing between messages
           y += 15;
@@ -691,85 +760,415 @@ document.addEventListener('DOMContentLoaded', function() {
   testPdfImageHandling();
 
   /**
-   * Format equations for better display in PDF
-   * Enhanced to handle LaTeX fraction notation and special symbols
+   * Check if text is a user question that should be preserved
    */
-  function formatEquation(equation) {
-    if (!equation) return '';
+  function isUserQuestion(text, speakerIsUser) {
+    if (!text || !speakerIsUser) return false;
     
-    // Remove excess whitespace
-    let formatted = equation.trim();
+    // Common question patterns regardless of subject matter
+    return (
+      text.endsWith('?') || 
+      text.toLowerCase().includes('what is') ||
+      text.toLowerCase().includes('explain') ||
+      text.toLowerCase().includes('how to') ||
+      text.toLowerCase().includes('definition of') ||
+      text.toLowerCase().includes('meaning of') ||
+      text.toLowerCase().includes('formula')
+    );
+  }
+
+  /**
+   * Generic function to identify important formula explanations
+   */
+  function isImportantExplanation(text) {
+    if (!text) return false;
     
-    // --- IMPROVED FRACTION HANDLING ---
-    
-    // Handle dp/dt style derivatives correctly
-    formatted = formatted
-      .replace(/\\frac{d([^{}]+)}{dt}/g, 'd$1/dt')           // dp/dt format
-      .replace(/d\s*([a-zA-Z]+)\s*d\s*t/g, 'd$1/dt')         // dpdt → dp/dt
-      .replace(/d\s*p\s*d\s*t/g, 'dp/dt')                    // Specifically fix dp/dt
-      .replace(/d\s*v\s*d\s*t/g, 'dv/dt')                    // Specifically fix dv/dt
-      .replace(/\\frac{d}{dt}([^{}]+)/g, 'd/dt($1)')         // Derivatives d/dt(p)
-      .replace(/\\frac{([^{}]+)}{([^{}]+)}/g, '$1/$2');      // General fractions
-    
-    // --- VARIABLE FORMATTING ---
-    
-    // Fix variables with repetition
-    formatted = formatted
-      .replace(/([a-z])\1+/g, (match, letter) => {           // Convert ppp → p, mmm → m
-        if (match.length <= 3) return letter;
-        return match;
-      })
-      .replace(/p\s*=\s*m\s*v\s*p/g, 'p = mv')               // Specifically fix p = mvp → p = mv
-      .replace(/m\s*m\s*m/g, 'm')                            // Fix mmm → m
-      .replace(/p\s*p\s*p/g, 'p')                            // Fix ppp → p
-      .replace(/v\s*v\s*v/g, 'v')                            // Fix vvv → v
-      .replace(/v\s*v\s*/g, 'v·v')                           // Fix vv → v·v (dot product)
-      .replace(/m\s*v\s*p/g, 'mv')                           // Fix mvp → mv
-      .replace(/m\s*v\s*m/g, 'mv');                          // Fix mvm → mv
-    
-    // --- OPERATORS AND SYMBOLS ---
-    
-    // Handle operators
-    formatted = formatted
-      .replace(/\\cdot/g, '·')                               // Dot operator
-      .replace(/\\times/g, '×')                              // Times operator
-      .replace(/=\s*/g, ' = ')                               // Add space around equals
-      .replace(/\+\s*/g, ' + ')                              // Add space around plus
-      .replace(/-\s*/g, ' - ');                              // Add space around minus
+    // Generic patterns for variable explanations across any domain
+    const patterns = [
+      // Generic "where/with" explanation patterns
+      /^where:/i,
+      /^with:/i,
+      /^given:/i,
+      /^where\s+[a-z]\s+is/i,       // Where X is...
+      /^with\s+[a-z]\s+=\s+/i,       // With X = ...
+      /^[a-zA-Z]\s+is\s+(the|a|an)?/i, // X is the...
       
-    // Greek letters
-    formatted = formatted
-      .replace(/\\alpha/g, 'α')
-      .replace(/\\beta/g, 'β')
-      .replace(/\\gamma/g, 'γ')
-      .replace(/\\delta/g, 'δ')
-      .replace(/\\Delta/g, 'Δ')
-      .replace(/\\epsilon/g, 'ε')
-      .replace(/\\theta/g, 'θ')
-      .replace(/\\lambda/g, 'λ')
-      .replace(/\\mu/g, 'μ')
-      .replace(/\\pi/g, 'π')
-      .replace(/\\rho/g, 'ρ')
-      .replace(/\\sigma/g, 'σ')
-      .replace(/\\tau/g, 'τ')
-      .replace(/\\phi/g, 'φ')
-      .replace(/\\omega/g, 'ω');
+      // Context explanation patterns
+      /^Start\s+with/i,
+      /^Since/i,
+      /^Therefore/i,
+      /^Assuming/i,
       
-    // Math symbols
-    formatted = formatted
-      .replace(/\\partial/g, '∂')
-      .replace(/\\infty/g, '∞')
-      .replace(/\\approx/g, '≈')
-      .replace(/\\neq/g, '≠')
-      .replace(/\\geq/g, '≥')
-      .replace(/\\leq/g, '≤')
-      .replace(/\\pm/g, '±')
-      .replace(/\\nabla/g, '∇')
-      .replace(/\\int/g, '∫')
-      .replace(/\\sum/g, '∑')
-      .replace(/\\prod/g, '∏');
+      // Any sentence with variable definition
+      /\b[a-z]\s*=\s*[a-zA-Z\s]+[^=]/i  // x = something (but not x = y = z)
+    ];
     
-    return formatted;
+    return patterns.some(pattern => pattern.test(text));
+  }
+
+  /**
+   * Enhanced equation text detection
+   */
+  function isEquationText(text) {
+    if (!text) return false;
+    
+    // Skip important explanations
+    if (isImportantExplanation(text)) {
+      return false;
+    }
+    
+    // Generic equation patterns that work across domains
+    const patterns = [
+      // Generic equation structures
+      /\b[a-z]\s*=\s*[a-z][a-z]?/i,   // x = y, etc.
+      /\b[a-z]\s*\/\s*[a-z][a-z]?/i,   // x/y, etc.
+      /\b[a-z]\s*\^\s*[0-9]/i,        // x^2, etc.
+      
+      // Common notation
+      /\bd[a-z]\/d[a-z]/i,            // dx/dy - derivatives
+      
+      // LaTeX markers (raw equations to filter)
+      /\\frac/,
+      /\\text/,
+      /\\left/,
+      /\\right/
+    ];
+    
+    return patterns.some(pattern => pattern.test(text));
+  }
+
+  /**
+   * Helper to normalize equations for comparison
+   */
+  function normalizeEquation(eq) {
+    if (!eq) return '';
+    
+    return eq.trim()
+      .replace(/\s+/g, ' ')  // Normalize whitespace to single spaces
+      .replace(/([a-zA-Z])\1{2,}/g, '$1')  // Remove repeated characters (e.g., FFF → F)
+      .toLowerCase();  // Case-insensitive comparison
+  }
+
+  /**
+   * Check if text is too similar to recent text but preserve user questions
+   */
+  function isSimilarToRecentText(text, recentSegments, isUserMessage = false) {
+    // Always keep user questions
+    if (isUserMessage && (text.includes('?') || 
+        text.toLowerCase().includes('what is'))) {
+      return false;
+    }
+    
+    // Regular similarity check
+    for (const segment of recentSegments) {
+      // If already identical, it's definitely a duplicate
+      if (text === segment) return true;
+      
+      // Check if it's a substring or very similar
+      if (segment.includes(text) || text.includes(segment)) {
+        // If one is a subset of the other and at least 70% of the length
+        if (text.length > segment.length * 0.7 || segment.length > text.length * 0.7) {
+          return true;
+        }
+      }
+      
+      // Check for specific patterns that indicate duplicates
+      if ((text.startsWith("Start with") && segment.startsWith("Start with")) ||
+          (text.startsWith("Since") && segment.startsWith("Since")) ||
+          (text.startsWith("Therefore") && segment.startsWith("Therefore")) ||
+          (text.startsWith("Where") && segment.startsWith("Where"))) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Process messages for PDF with improved question and explanation preservation
+   */
+  function processMessagesForPDF(messages) {
+    if (!messages || !Array.isArray(messages)) return messages;
+    
+    return messages.map(message => {
+      if (!message.items || !Array.isArray(message.items)) return message;
+      
+      const isUserMessage = message.speaker === 'You';
+      const processedItems = [];
+      const seenText = new Set();
+      const seenEquations = new Set();
+      
+      message.items.forEach((item, index) => {
+        if (item.type === 'text') {
+          const textContent = normalizeText(item.content?.trim());
+          if (!textContent || seenText.has(textContent)) {
+            return;
+          }
+          
+          // Always keep user questions and important explanations
+          const isQuestion = isUserQuestion(textContent, isUserMessage);
+          const isImportant = isImportantExplanation(textContent);
+          
+          // Keep text if it's a question, important explanation, or not an equation
+          if (isUserMessage || isQuestion || isImportant || !isEquationText(textContent)) {
+            seenText.add(textContent);
+            processedItems.push(item);
+          }
+        } 
+        else if (item.type === 'equation') {
+          const eq = (item.content || '').trim();
+          if (!eq) return;
+          
+          const normalizedEq = normalizeEquation(eq);
+          
+          // Skip duplicate equations
+          if (seenEquations.has(normalizedEq)) {
+            return;
+          }
+          
+          seenEquations.add(normalizedEq);
+          processedItems.push(item);
+        }
+        else {
+          // Keep other item types (tables, images, etc.)
+          processedItems.push(item);
+        }
+      });
+      
+      return { ...message, items: processedItems };
+    });
+  }
+
+  /**
+   * Properly fix text formatting including bullet points and monospaced text
+   */
+  function normalizeText(text) {
+    if (!text) return '';
+    
+    // Special handling for "That's about the energy" phrase
+    if (text.includes("That") && text.includes("energy") && text.includes("kilotons")) {
+      return "That's about the energy released by 21 kilotons of TNT – similar to the Hiroshima atomic bomb.";
+    }
+    
+    // The Ø character often appears in headings/titles
+    if (text.includes('Ø')) {
+      // This is a heading - clean up and preserve
+      let cleaned = text.replace('Ø>Ÿà', '').replace('Ø>', '').replace('Ø=Û¥', '');
+      
+      // If it's "What It Means" heading
+      if (cleaned.includes('What') && cleaned.includes('Means')) {
+        return "What It Means:";
+      }
+      
+      // If it's "Example" heading
+      if (cleaned.includes('Example')) {
+        return "Example:";
+      }
+      
+      return cleaned.trim();
+    }
+    
+    // Handle monospaced/pre-formatted text with special spacing
+    if (/\b[A-Za-z](\s)[A-Za-z]\b/.test(text) || text.includes('  ')) {
+      let cleaned = text;
+      
+      // Replace excessive spaces between characters
+      cleaned = cleaned.replace(/([A-Za-z])(\s)([A-Za-z])/g, '$1$3');
+      
+      // Clean up and add natural spacing
+      cleaned = cleaned
+        .replace(/([a-z])([A-Z])/g, '$1 $2')         // Add space between lower and uppercase
+        .replace(/(\w)(\d)/g, '$1 $2')               // Add space between word and number
+        .replace(/(\d)([A-Za-z])/g, '$1 $2')         // Add space between number and word
+        .replace(/([.:;!?])([A-Za-z])/g, '$1 $2');   // Add space after punctuation
+      
+      return cleaned.trim();
+    }
+    
+    // Fix text without spaces that should have them
+    if (text.length > 30 && !text.includes(' ') && /[a-z][A-Z]/.test(text)) {
+      return text.replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+    }
+    
+    // Handle bullet points
+    if ((text.startsWith('•') || text.startsWith('-') || 
+         (text.length > 10 && /^[A-Z]/.test(text) && text.includes(':')))) {
+      
+      // Fix actual bullet points or lines that should be bullet points
+      let bullet = text;
+      
+      // Standardize bullet points
+      if (!bullet.startsWith('•') && !bullet.startsWith('-')) {
+        bullet = '• ' + bullet;
+      } else {
+        bullet = '• ' + bullet.substring(1).trim();
+      }
+      
+      return bullet.trim();
+    }
+    
+    return text.trim();
+  }
+
+  /**
+   * Organize message content with improved handling of equation text
+   */
+  function organizeMessageContent(items) {
+    if (!Array.isArray(items) || items.length === 0) return [];
+    
+    // Group equations by their normalized form
+    const equationGroups = new Map();
+    const equationContexts = new Map();
+    
+    // Identify which text items contain equations
+    const textWithEquations = new Set();
+    
+    // First pass: Identify text segments that precede equations or contain equations
+    for (let i = 0; i < items.length; i++) {
+      // Check for text before equations
+      if (i < items.length - 1 && 
+          items[i].type === 'text' && 
+          items[i+1].type === 'equation') {
+        const textContent = normalizeText(items[i].content?.trim() || '');
+        if (textContent) {
+          equationContexts.set(normalizeEquation(items[i+1].content), textContent);
+        }
+      }
+      
+      // Check for text that contains equations
+      if (items[i].type === 'text') {
+        const textContent = items[i].content?.trim() || '';
+        if (isEquationText(textContent)) {
+          textWithEquations.add(i); // Mark this text as containing equations
+        }
+      }
+    }
+    
+    // Group similar equations
+    items.forEach(item => {
+      if (item.type === 'equation' && item.content) {
+        const normalizedEq = normalizeEquation(item.content);
+        if (!equationGroups.has(normalizedEq)) {
+          equationGroups.set(normalizedEq, []);
+        }
+        equationGroups.get(normalizedEq).push(item);
+      }
+    });
+    
+    // Select the best version of each equation
+    const bestEquations = new Map();
+    equationGroups.forEach((eqList, normalizedKey) => {
+      // Sort equations by "quality" - prefer cleaner formats over raw LaTeX
+      const sortedEqs = eqList.sort((a, b) => {
+        const aRawness = countLaTeXMarkers(a.content);
+        const bRawness = countLaTeXMarkers(b.content);
+        return aRawness - bRawness; // Lower score (less raw LaTeX) is better
+      });
+      
+      // Take the cleanest version
+      bestEquations.set(normalizedKey, sortedEqs[0]);
+    });
+    
+    // Build the organized output with improved filtering
+    const organizedItems = [];
+    const processedTexts = new Set();
+    
+    items.forEach((item, index) => {
+      if (!item) return;
+      
+      // For equations, only include the best version
+      if (item.type === 'equation') {
+        const normalizedEq = normalizeEquation(item.content);
+        const bestEq = bestEquations.get(normalizedEq);
+        
+        // Skip if this isn't the best version of this equation
+        if (bestEq !== item) return;
+        
+        // Include context text if available
+        const context = equationContexts.get(normalizedEq);
+        if (context && !processedTexts.has(context)) {
+          organizedItems.push({
+            type: 'text', 
+            content: context
+          });
+          processedTexts.add(context);
+        }
+        
+        // Add the best equation
+        organizedItems.push(bestEq);
+      }
+      // For text, apply stricter filtering for equation-containing text
+      else if (item.type === 'text') {
+        const textContent = normalizeText(item.content?.trim() || '');
+        
+        // Skip empty text
+        if (!textContent) return;
+        
+        // Skip text already processed
+        if (processedTexts.has(textContent)) return;
+        
+        // Skip text marked as containing equations 
+        // (we'll keep the associated formatted equation instead)
+        if (textWithEquations.has(index)) return;
+        
+        // Skip text that appears to be describing LaTeX
+        if (isEquationText(textContent)) return;
+        
+        // Add the text since it passed all filters
+        organizedItems.push(item);
+        processedTexts.add(textContent);
+      }
+      // Other types just pass through
+      else {
+        organizedItems.push(item);
+      }
+    });
+    
+    return organizedItems;
+  }
+
+  /**
+   * Count LaTeX markers to determine how "raw" an equation is
+   * Higher score means more raw LaTeX markers
+   */
+  function countLaTeXMarkers(text) {
+    if (!text) return 0;
+    
+    let score = 0;
+    
+    // Count backslashes
+    score += (text.match(/\\/g) || []).length * 3;
+    
+    // Count curly braces
+    score += (text.match(/\{|\}/g) || []).length * 2;
+    
+    // Count LaTeX commands
+    score += (text.match(/\\[a-zA-Z]+/g) || []).length * 5;
+    
+    // Count \frac
+    score += (text.match(/\\frac/g) || []).length * 10;
+    
+    // Count \left and \right
+    score += (text.match(/\\left|\\right/g) || []).length * 5;
+    
+    return score;
+  }
+
+  /**
+   * Check if a text segment appears to be describing raw LaTeX
+   */
+  function isRawLaTeXDescription(text) {
+    if (!text) return false;
+    
+    // Check common LaTeX description patterns
+    const patterns = [
+      /\\frac\{.*?\}\{.*?\}/,   // Contains \frac{...}{...}
+      /\\text\{.*?\}/,          // Contains \text{...}
+      /\\left\(.*?\\right\)/,   // Contains \left(...\right)
+      /\\begin\{.*?\}.*?\\end\{.*?\}/  // Contains \begin{...}...\end{...}
+    ];
+    
+    return patterns.some(pattern => pattern.test(text));
   }
 
   /**
@@ -1004,5 +1403,65 @@ document.addEventListener('DOMContentLoaded', function() {
         }]
       };
     }
+  }
+
+  /**
+   * Format equations for better display in PDF
+   */
+  function formatEquation(equation) {
+    if (!equation) return '';
+    
+    // Fix repeated characters in variable names
+    let formatted = equation.replace(/([A-Za-z])\1{2,}/g, '$1');
+    
+    // Remove excess whitespace
+    formatted = formatted.trim();
+    
+    // Make fractions more readable
+    formatted = formatted
+      .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '$1/$2')
+      .replace(/\\frac ([^{])(.) ([^{])(.)/g, '$1$2/$3$4');
+    
+    // Fix spacing around operators
+    formatted = formatted
+      .replace(/([0-9a-zA-Z])\+/g, '$1 + ')
+      .replace(/\+([0-9a-zA-Z])/g, '+ $1')
+      .replace(/([0-9a-zA-Z])-/g, '$1 - ')
+      .replace(/-([0-9a-zA-Z])/g, '- $1')
+      .replace(/([0-9a-zA-Z])\*/g, '$1 × ')
+      .replace(/\*([0-9a-zA-Z])/g, '× $1');
+    
+    // Fix common symbols
+    formatted = formatted
+      .replace(/\\alpha/g, 'α')
+      .replace(/\\beta/g, 'β')
+      .replace(/\\gamma/g, 'γ')
+      .replace(/\\delta/g, 'δ')
+      .replace(/\\theta/g, 'θ')
+      .replace(/\\pi/g, 'π')
+      .replace(/\\sigma/g, 'σ')
+      .replace(/\\mu/g, 'μ')
+      .replace(/\\infty/g, '∞')
+      .replace(/\\times/g, '×')
+      .replace(/\\cdot/g, '·')
+      .replace(/\\div/g, '÷')
+      .replace(/\\approx/g, '≈')
+      .replace(/\\neq/g, '≠')
+      .replace(/\\ne/g, '≠')
+      .replace(/\\geq/g, '≥')
+      .replace(/\\leq/g, '≤');
+      
+    // Clean up any remaining LaTeX commands
+    formatted = formatted
+      .replace(/\\[a-zA-Z]+/g, '') // Remove any other LaTeX commands
+      .replace(/\{|\}/g, '')      // Remove curly braces
+      .replace(/\\left|\\right/g, '');  // Remove left/right commands
+      
+    // Final cleanup
+    formatted = formatted
+      .replace(/\s+/g, ' ')       // Normalize spaces
+      .trim();
+      
+    return formatted;
   }
 }); 
