@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ChatGPT to PDF Converter</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 {
+      font-size: 18px;
+      text-align: center;
+      margin-bottom: 15px;
+    }
+    button {
+      padding: 10px 15px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-bottom: 15px;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    .export-counter {
+      display: none;
+      font-size: 14px;
+      color: #666;
+      margin-top: 10px;
+    }
+    .features {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
+      text-align: center;
+    }
+    .error {
+      color: #f44336;
+      font-size: 14px;
+      margin-top: 10px;
+      text-align: center;
+    }
+  </style>
+  <script src="jspdf.umd.min.js"></script>
+  <script src="jspdf.plugin.autotable.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>ChatGPT to PDF Converter</h1>
+    <button id="generatePdf">Generate PDF</button>
+    <button id="testImages" style="background-color: #ff9800;">Test Images</button>
+    <div class="export-counter" id="exportCounter">Loading...</div>
+    <div class="features">Includes images, equations, tables</div>
+    <div class="error" id="errorMessage"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html> 

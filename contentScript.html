@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Content Script Debug</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    .success {
+      color: green;
+    }
+    .error {
+      color: red;
+    }
+    pre {
+      background: #f5f5f5;
+      padding: 10px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Content Script Debugging</h1>
+  <p>This page helps debug content script loading issues.</p>
+  
+  <div>
+    <h2>Status</h2>
+    <div id="status">Checking...</div>
+  </div>
+  
+  <div>
+    <h2>Actions</h2>
+    <button id="injectScript">Force Inject Content Script</button>
+    <button id="testConnection">Test Connection</button>
+  </div>
+  
+  <div>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </div>
+  
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const injectBtn = document.getElementById('injectScript');
+      const testBtn = document.getElementById('testConnection');
+      
+      function log(message, isError = false) {
+        const timestamp = new Date().toLocaleTimeString();
+        logEl.innerHTML += `[${timestamp}] ${message}\n`;
+        if (isError) console.error(message);
+        else console.log(message);
+      }
+      
+      // Check status
+      chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+        const activeTab = tabs[0];
+        
+        if (!activeTab.url.includes('chat.openai.com') && !activeTab.url.includes('chatgpt.com')) {
+          statusEl.className = 'error';
+          statusEl.textContent = 'Not on a ChatGPT page';
+          return;
+        }
+        
+        chrome.runtime.sendMessage({
+          action: 'checkContentScriptLoaded',
+          tabId: activeTab.id
+        }, function(response) {
+          if (chrome.runtime.lastError) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error checking content script';
+            log('Error: ' + chrome.runtime.lastError.message, true);
+            return;
+          }
+          
+          if (response && response.isLoaded) {
+            statusEl.className = 'success';
+            statusEl.textContent = 'Content script is loaded';
+          } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Content script is NOT loaded';
+          }
+        });
+      });
+      
+      // Inject script button
+      injectBtn.addEventListener('click', function() {
+        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+          const activeTab = tabs[0];
+          
+          chrome.runtime.sendMessage({
+            action: 'forceInjectContentScript',
+            tabId: activeTab.id
+          }, function(response) {
+            if (chrome.runtime.lastError) {
+              log('Injection error: ' + chrome.runtime.lastError.message, true);
+              return;
+            }
+            
+            if (response && response.success) {
+              log('Content script injected successfully');
+              statusEl.className = 'success';
+              statusEl.textContent = 'Content script is loaded';
+            } else {
+              log('Failed to inject content script: ' + (response?.error || 'unknown error'), true);
+            }
+          });
+        });
+      });
+      
+      // Test connection button
+      testBtn.addEventListener('click', function() {
+        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+          const activeTab = tabs[0];
+          
+          log('Testing connection to content script...');
+          chrome.tabs.sendMessage(activeTab.id, {action: 'ping'}, function(response) {
+            if (chrome.runtime.lastError) {
+              log('Connection error: ' + chrome.runtime.lastError.message, true);
+              return;
+            }
+            
+            if (response && response.pong) {
+              log('Connection successful! Content script responded with: ' + response.pong);
+            } else {
+              log('Content script responded but without expected data', true);
+            }
+          });
+        });
+      });
+    });
+  </script>
+</body>
+</html> 
