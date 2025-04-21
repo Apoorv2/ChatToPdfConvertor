@@ -1,3 +1,36 @@
+/**
+ * ChatGPT to PDF Converter - Background Script
+ * Handles extension lifecycle and messaging
+ */
+
+// Listen for installation
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') {
+    // Initialize storage with default values
+    chrome.storage.local.set({
+      exportCount: 0,
+      exportDate: new Date().toISOString().split('T')[0], // Today's date
+      settings: {
+        includeTables: true,
+        includeImages: true,
+        includeCode: true,
+        includeEquations: true
+      }
+    });
+    
+    // Open welcome page
+    chrome.tabs.create({
+      url: 'https://your-site.com/welcome'
+    });
+  }
+});
+
+// Listen for messages from content script or popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Add any background processing logic here if needed
+  return false; // No async response needed
+});
+
 // Log when extension is installed or updated
 chrome.runtime.onInstalled.addListener(function() {
   console.log('ChatGPT to PDF Converter has been installed or updated');
@@ -74,6 +107,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
+  // Handle data from injected page script
+  if (message.action === 'pageScriptData') {
+    console.log('Background received data from page script:', message.data);
+    // Store the data so popup can access it
+    chrome.storage.local.set({
+      chatContent: message.data
+    }, function() {
+      console.log('Content saved to storage');
+    });
+  }
+
   return true;
 });
 
@@ -83,4 +127,30 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     console.log(`Tab ${tabId} closed, removing from loaded tabs list`);
     loadedTabs.delete(tabId);
   }
-}); 
+});
+
+// Listen for tab updates to ensure content script is loaded
+chrome.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
+  if (changeInfo.status === 'complete' && tab.url) {
+    const isChatGPT = tab.url.includes('chat.openai.com') || 
+                      tab.url.includes('chatgpt.com');
+    
+    if (isChatGPT) {
+      console.log(`ChatGPT page loaded in tab ${tabId}, ensuring content script`);
+      
+      // Check if the content script is already loaded
+      chrome.tabs.sendMessage(tabId, {action: 'ping'}, function(response) {
+        if (chrome.runtime.lastError) {
+          // Content script not loaded, inject it
+          console.log(`Content script not found in tab ${tabId}, injecting now`);
+          chrome.scripting.executeScript({
+            target: {tabId: tabId},
+            files: ['content.js']
+          });
+        } else {
+          console.log(`Content script already loaded in tab ${tabId}`);
+        }
+      });
+    }
+  }
+});
