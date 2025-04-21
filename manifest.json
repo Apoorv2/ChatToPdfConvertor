@@ -18,11 +18,13 @@
     "activeTab",
     "storage",
     "downloads",
-    "scripting"
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://chat.openai.com/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://chatgpt.com/c/*"
   ],
   "content_scripts": [
     {
@@ -32,7 +34,7 @@
         "https://chatgpt.com/c/*"
       ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
   "web_accessible_resources": [

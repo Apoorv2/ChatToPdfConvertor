@@ -1,29 +1,64 @@
 // This script is directly injected into the page
 console.log('INJECTED SCRIPT LOADED DIRECTLY INTO THE PAGE');
 
+// Track if we've already sent content to avoid duplicates
+let contentSent = false;
+
+// Add this at the top of your script
+let extractionAttempts = 0;
+const MAX_EXTRACTION_ATTEMPTS = 3;
+
 // Extract content immediately upon loading
 window.addEventListener('load', function() {
-  console.log('Window loaded, extracting content automatically');
-  const data = extractChatContent();
-  sendExtractedContent(data);
+  if (!contentSent) {
+    console.log('Window loaded, extracting content');
+    const data = extractChatContent();
+    sendExtractedContent(data);
+    contentSent = true;
+  }
 });
 
-// Also extract immediately if the document is already loaded
-if (document.readyState === 'complete') {
+// Only extract if document is loaded AND we haven't sent content yet
+if (document.readyState === 'complete' && !contentSent) {
   console.log('Document already loaded, extracting content immediately');
   const data = extractChatContent();
   sendExtractedContent(data);
+  contentSent = true;
 }
 
 // Function to send the extracted content back to extension
 function sendExtractedContent(data) {
-  console.log('Sending extracted content to extension:', data);
+  console.log('Attempting to send extracted content:', data);
   
+  if (!data?.messages?.length && extractionAttempts < MAX_EXTRACTION_ATTEMPTS) {
+    extractionAttempts++;
+    console.log(`No messages found, attempt ${extractionAttempts} of ${MAX_EXTRACTION_ATTEMPTS}`);
+    
+    // Retry after a delay
+    setTimeout(() => {
+      const newData = extractChatContent();
+      if (newData?.messages?.length) {
+        window.postMessage({
+          type: 'FROM_PAGE_SCRIPT',
+          action: 'contentExtracted',
+          title: newData.title,
+          messages: newData.messages
+        }, '*');
+        contentSent = true;
+      }
+    }, 500 * extractionAttempts); // Increase delay with each attempt
+    return;
+  }
+  
+  // Reset attempts counter
+  extractionAttempts = 0;
+  
+  // Send the data
   window.postMessage({
     type: 'FROM_PAGE_SCRIPT',
     action: 'contentExtracted',
-    title: data.title,
-    messages: data.messages
+    title: data.title || 'ChatGPT Conversation',
+    messages: data.messages || []
   }, '*');
 }
 
@@ -387,15 +422,23 @@ window.addEventListener('message', function(event) {
     
     if (event.data.action === 'extractContentDirect') {
       console.log('Extraction request received, extracting content...');
-      const data = extractChatContent();
-      sendExtractedContent(data);
+      if (!contentSent) {
+        const data = extractChatContent();
+        sendExtractedContent(data);
+        contentSent = true;
+      } else {
+        console.log('Content already sent, not sending again');
+      }
     }
   }
 });
 
-// Notify that we're ready
-window.postMessage({
-  type: 'FROM_PAGE_SCRIPT',
-  action: 'scriptLoaded',
-  message: 'Injected script is loaded and ready'
-}, '*');
+// Only send "ready" notification, don't overwrite content in storage
+setTimeout(() => {
+  console.log('Delayed script ready notification');
+  window.postMessage({
+    type: 'FROM_PAGE_SCRIPT',
+    action: 'scriptReady',  // Use a different action name
+    message: 'Injected script is loaded and ready'
+  }, '*');
+}, 100);

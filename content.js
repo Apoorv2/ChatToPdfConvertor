@@ -6,12 +6,36 @@
  * Privacy: All processing is local; no data is sent to external servers.
  */
 
+// Add this at the top of content.js
+console.log('Content script loaded at:', new Date().toISOString());
+
+// Add error handling for script injection
+window.onerror = function(msg, url, lineNo, columnNo, error) {
+  console.error('Content script error:', {
+    message: msg,
+    url: url,
+    lineNo: lineNo,
+    columnNo: columnNo,
+    error: error
+  });
+  return false;
+};
+
 // Send a console message to confirm loading
 console.log('ChatGPT PDF Converter content script LOADED at', new Date().toISOString());
 
-// Add a ping handler
+// Add at the top of the file
+const DEBUG = true;
+
+function debugLog(...args) {
+  if (DEBUG) {
+    console.log('[ChatGPT-PDF]', ...args);
+  }
+}
+
+// Update the message listener in content.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('Content script received message:', request);
+  debugLog('Received message:', request);
   
   if (request.action === 'ping') {
     console.log('Received ping, responding with pong');
@@ -19,27 +43,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   
-  if (request.action === 'extractContent') {
-    console.log('Extraction request received, beginning content extraction...');
-    
-    // Extract content and send it back to popup
+  // Add handling for extractContentDirect
+  if (request.type === 'FROM_EXTENSION' && request.action === 'extractContentDirect') {
+    debugLog('Starting content extraction...');
     try {
       const data = getConversationData();
-      console.log(`Extraction complete. Found ${data.messages.length} messages with title: "${data.title}"`);
+      debugLog('Extraction complete:', data);
       
-      // Log sample of the first message if available
-      if (data.messages.length > 0) {
-        console.log('Sample of first message:', 
-          data.messages[0].speaker, 
-          data.messages[0].items?.length + ' items');
+      if (!data.messages || data.messages.length === 0) {
+        debugLog('No messages found in extracted data');
+        sendResponse({ success: false, error: 'No messages found in conversation' });
+        return false;
       }
       
-      sendResponse({ success: true, data });
+      chrome.storage.local.set({ chatContent: data }, () => {
+        debugLog('Content saved to storage');
+        sendResponse({ success: true, messageCount: data.messages.length });
+      });
+      
+      return true;
     } catch (error) {
-      console.error('Error during extraction:', error);
+      debugLog('Extraction error:', error);
       sendResponse({ success: false, error: error.message });
+      return false;
     }
-    return true; // Keep channel open for async response
   }
   
   return false; // No response for other messages
@@ -60,11 +87,47 @@ let isObserving = false;
 // Initialize when the page loads
 initializeExtraction();
 
+// Debug helper
+function logDOMStructure() {
+  console.log('=== DOM Structure Analysis ===');
+  
+  // Check main containers
+  const mainContainer = document.querySelector('div.flex.flex-col.items-center');
+  console.log('Main container found:', !!mainContainer);
+  
+  // Check message containers
+  const messageContainers = document.querySelectorAll('div.group.w-full');
+  console.log('Message containers found:', messageContainers.length);
+  
+  // Check text content
+  const textElements = document.querySelectorAll('div[class*="text-base"], div[class*="markdown"]');
+  console.log('Text elements found:', textElements.length);
+  
+  console.log('=== End DOM Analysis ===');
+}
+
+// Call this when initializing
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('Content script initializing...');
+  logDOMStructure();
+});
+
 /**
  * Initialize the extraction process
  */
 function initializeExtraction() {
   console.log('Initializing ChatGPT content extraction');
+  
+  // Clear any existing processed markers
+  document.querySelectorAll('.processed').forEach(el => {
+    el.classList.remove('processed');
+  });
+  
+  // Reset conversation data
+  conversationData = {
+    title: '',
+    messages: []
+  };
   
   // Set page title
   updateConversationTitle();
@@ -88,374 +151,123 @@ function updateConversationTitle() {
  * Extract all current content on the page
  */
 function extractCurrentContent() {
-  console.log('Extracting current content');
-  
-  // Find messages
-  const messageBlocks = document.querySelectorAll('[data-testid="conversation-turn"], .text-base, div[class*="message"], .prose');
-  console.log(`Found ${messageBlocks.length} message blocks`);
-  
-  // Process each message
-  messageBlocks.forEach((block, index) => {
-    processMessageBlock(block, index);
-  });
-}
+  debugLog('Extracting current content');
+  // Clear previous markers
+  document.querySelectorAll('.processed').forEach(el => el.classList.remove('processed'));
 
-/**
- * CRITICAL: Do not modify; handles dynamic content
- * Setup mutation observer to detect new messages
- */
-function setupMutationObserver() {
-  if (isObserving) {
-    console.log('Mutation observer already running');
-    return;
+  // Strategy 1: Articles inside main
+  let blocks = Array.from(document.querySelectorAll('main article'));
+  debugLog('extractCurrentContent: articles found:', blocks.length);
+  
+  // Strategy 2: data-testid conversation turns
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('[data-testid="conversation-turn"]'));
+    debugLog('extractCurrentContent: data-testid found:', blocks.length);
   }
   
-  console.log('Setting up mutation observer for dynamic content');
-  
-  const observer = new MutationObserver((mutations) => {
-    let shouldExtract = false;
-    
-    // Check if relevant content changed
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList') {
-        const addedNodes = Array.from(mutation.addedNodes);
-        
-        // Check if added nodes contain message elements
-        for (const node of addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            if (node.matches('[data-testid="conversation-turn"], .text-base, div[class*="message"], .prose')) {
-              shouldExtract = true;
-              break;
-            }
-            
-            // Check for child message elements
-            if (node.querySelector('[data-testid="conversation-turn"], .text-base, div[class*="message"], .prose')) {
-              shouldExtract = true;
-              break;
-            }
-          }
-        }
-      }
-      
-      if (shouldExtract) break;
-    }
-    
-    // If relevant changes detected, re-extract content
-    if (shouldExtract) {
-      extractCurrentContent();
-    }
+  // Strategy 3: ChatGPT group style
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('div.group.w-full'));
+    debugLog('extractCurrentContent: group.w-full found:', blocks.length);
+  }
+
+  // Strategy 4: fallback generic div patterns
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('div[class*="min-h-"]'));
+    debugLog('extractCurrentContent: generic min-h- found:', blocks.length);
+  }
+
+  // Process each block
+  let count = 0;
+  blocks.forEach((block, idx) => {
+    if (!isValidMessageBlock(block)) return;
+    processMessageBlock(block, idx);
+    count++;
   });
-  
-  // Observe the entire body for changes
-  observer.observe(document.body, { 
-    childList: true, 
-    subtree: true 
-  });
-  
-  isObserving = true;
+  debugLog('extractCurrentContent: processed count', count);
+
+  if (blocks.length > 0) {
+    debugLog('First block HTML snippet:', blocks[0].outerHTML.substring(0, 200));
+  }
 }
 
-/**
- * Process a single message block
- */
-function processMessageBlock(block, index) {
-  console.log(`Processing message block ${index}`);
+function isValidMessageBlock(block) {
+  // Skip empty blocks or those with only whitespace/newlines
+  if (!block.textContent.trim()) {
+    return false;
+  }
+  
+  // Skip system messages and UI elements
+  const unwantedClasses = ['cursor-pointer', 'absolute', 'hidden'];
+  if (unwantedClasses.some(cls => block.className.includes(cls))) {
+    return false;
+  }
+  
+  return true;
+}
+
+function extractMessageData(block) {
   try {
-    // Determine if user or assistant message
-    const isUser = block.querySelector('[data-message-author-role="user"]') || 
-                   block.classList.contains('dark:bg-gray-800');
+    // Determine if this is a user message
+    const isUser = block.closest('div[class*="dark:bg-gray-800"]') || 
+                  block.querySelector('[data-message-author-role="user"]');
     
     const speaker = isUser ? 'User' : 'Assistant';
     const timestamp = new Date().toLocaleTimeString();
     
-    // Track elements we've processed
-    const processedElements = new Set();
-    
-    // Items to store (text, code, images, etc.)
     const items = [];
     
-    // 1. Extract code blocks first
-    const codeBlocks = block.querySelectorAll('pre, code:not(pre code), .code-block, [class*="language-"], .bg-black');
-    
-    codeBlocks.forEach(codeBlock => {
-      // Skip if empty or too small
-      if (!codeBlock.textContent.trim() || codeBlock.textContent.length < 5) return;
-      
-      // Get language if available
-      let language = '';
-      
-      // Look for language in classes or data attributes
-      if (codeBlock.className) {
-        const classes = codeBlock.className.split(' ');
-        for (const cls of classes) {
-          if (cls.startsWith('language-')) {
-            language = cls.replace('language-', '');
-            break;
-          }
-        }
-      }
-      
-      // Try data-language attribute
-      if (!language && codeBlock.dataset.language) {
-        language = codeBlock.dataset.language;
-      }
-      
-      // Get actual code content
-      const code = codeBlock.textContent.trim();
-      
-      // Skip if code is too short or not likely code
-      if (code.length < 5 || (code.split('\n').length === 1 && !code.includes(';') && !code.includes('{'))) {
-        return;
-      }
-      
-      // Add code block to items
-      items.push({
-        type: 'code',
-        content: code,
-        language: language
-      });
-      
-      // Mark as processed
-      processedElements.add(codeBlock);
-      codeBlock.querySelectorAll('*').forEach(child => {
-        processedElements.add(child);
-      });
-    });
-    
-    // 2. Extract equations using regex and DOM
-    const equationElements = block.querySelectorAll('.katex, .katex-display, [data-math]');
-    const latexRegex = /\$\$([^\$]+)\$\$|\$([^\$]+)\$|\\\[([^\]]+)\\\]|\\\((\S.*?\S)\\\)|\`{3}latex\n([\s\S]*?)\n\`{3}/g;
-    
-    // From DOM elements
-    equationElements.forEach(el => {
-      if (processedElements.has(el)) return;
-      
-      // Try to get LaTeX source
-      const mathContent = el.getAttribute('data-math') || 
-                         el.querySelector('.katex-mathml annotation')?.textContent || 
-                         el.textContent;
-      
-      if (mathContent) {
+    // Extract code blocks first
+    const codeBlocks = block.querySelectorAll('pre');
+    codeBlocks.forEach(pre => {
+      const code = pre.querySelector('code');
+      if (code) {
+        const language = getCodeLanguage(pre);
         items.push({
-          type: 'equation',
-          content: mathContent.trim()
+          type: 'code',
+          content: code.textContent.trim(),
+          language: language
         });
-        
-        // Mark as processed
-        processedElements.add(el);
       }
     });
     
-    // From regex in text
-    const textContent = block.textContent;
-    let match;
-    while ((match = latexRegex.exec(textContent))) {
-      const equation = match[1] || match[2] || match[3] || match[4] || match[5];
-      if (equation) {
-        items.push({
-          type: 'equation',
-          content: equation.trim()
-        });
-      }
-    }
-    
-    // 3. Extract text content
-    const textElements = block.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6');
-    
-    let foundTextElements = false;
-    textElements.forEach(el => {
-      // Skip if empty or already processed
-      if (!el.textContent.trim() || processedElements.has(el)) return;
-      
-      // Skip if inside a processed element
-      let isNested = false;
-      let parent = el.parentElement;
-      while (parent && parent !== block) {
-        if (processedElements.has(parent)) {
-          isNested = true;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-      if (isNested) return;
-      
-      // Extract emojis with the text
-      const cleanedText = sanitizeTextForPDF(el.textContent.trim());
-      
-      // Add this text content
-      if (cleanedText) {
-        items.push({
-          type: 'text',
-          content: cleanedText
-        });
-        
-        foundTextElements = true;
-        processedElements.add(el);
+    // Extract text segments (multiple markdown/text containers)
+    const textContainers = block.querySelectorAll(
+      'div[class*="markdown"], div[class*="text-base"]'
+    );
+    textContainers.forEach(container => {
+      // Skip code block containers
+      if (container.querySelector('pre, code')) return;
+      const rawText = container.innerText.trim();
+      if (rawText) {
+        items.push({ type: 'text', content: sanitizeTextForPDF(rawText) });
+        debugLog('Found text:', rawText);
       }
     });
     
-    // 4. If no text elements found, get text directly from block
-    if (!foundTextElements && block.textContent.trim()) {
-      // Get text excluding code blocks
-      let blockText = block.textContent;
-      
-      // Remove code block content to avoid duplication
-      for (const item of items) {
-        if (item.type === 'code' || item.type === 'equation') {
-          blockText = blockText.replace(item.content, '');
-        }
-      }
-      
-      // Clean and add remaining text
-      const cleanedText = sanitizeTextForPDF(blockText.trim());
-      if (cleanedText) {
-        items.push({
-          type: 'text',
-          content: cleanedText
-        });
-      }
-    }
-    
-    // 5. Extract images (limited to 5 per message)
-    const images = [];
-    const imageElements = block.querySelectorAll('img');
-    
-    imageElements.forEach(img => {
-      // Skip avatars, small images, and already processed images
-      if (processedElements.has(img) || 
-          img.width < 50 || 
-          img.height < 50 || 
-          img.src.includes('avatar')) {
-        return;
-      }
-      
-      // Check for emoji images (32x32 or smaller)
-      const isEmoji = img.width <= 32 && img.height <= 32;
-      
-      // Limit to 5 images per message
-      if (images.length < 5) {
-        images.push({
-          type: 'image',
-          content: img.src,
-          width: img.width,
-          height: img.height,
-          isEmoji: isEmoji
-        });
-        
-        processedElements.add(img);
-      }
-    });
-    
-    // Add images to items
-    items.push(...images);
-    
-    // 6. Extract tables (limited to 10 rows)
-    const tableElements = block.querySelectorAll('table');
-    
-    tableElements.forEach(table => {
-      if (processedElements.has(table)) return;
-      
-      const headers = [];
-      const rows = [];
-      
-      // Extract headers
-      const headerRow = table.querySelector('thead tr');
-      if (headerRow) {
-        headerRow.querySelectorAll('th').forEach(th => {
-          headers.push(th.textContent.trim());
-        });
-      }
-      
-      // Extract rows (limit to 10)
-      const tableRows = table.querySelectorAll('tbody tr');
-      let rowCount = 0;
-      
-      tableRows.forEach(tr => {
-        if (rowCount >= 10) return;
-        
-        const rowData = [];
-        tr.querySelectorAll('td').forEach(td => {
-          rowData.push(td.textContent.trim());
-        });
-        
-        if (rowData.length > 0) {
-          rows.push(rowData);
-          rowCount++;
-        }
-      });
-      
-      // Add table if it has data
-      if (headers.length > 0 || rows.length > 0) {
-        items.push({
-          type: 'table',
-          content: {
-            headers: headers,
-            rows: rows
-          }
-        });
-        
-        processedElements.add(table);
-      }
-    });
-    
-    // Add message if it has items
+    // Only return if we have content
     if (items.length > 0) {
-      // Check if we already have this message (by comparing content)
-      const messageExists = conversationData.messages.some(msg => {
-        if (msg.speaker !== speaker) return false;
-        if (msg.items.length !== items.length) return false;
-        
-        // Compare first item's content as a simple check
-        if (msg.items[0]?.content !== items[0]?.content) return false;
-        
-        return true;
-      });
-      
-      if (!messageExists) {
-        conversationData.messages.push({
-          speaker,
-          timestamp,
-          items
-        });
-      }
+      return {
+        speaker,
+        timestamp,
+        items
+      };
     }
   } catch (error) {
-    console.error(`Error processing message block ${index}:`, error);
+    console.error('Error extracting message data:', error);
   }
+  
+  return null;
 }
 
-/**
- * Get the current conversation data
- */
-function getConversationData() {
-  console.log('Getting conversation data for PDF generation');
-  
-  // Make sure we have the latest content
-  updateConversationTitle();
-  console.log(`Updated conversation title: ${conversationData.title}`);
-  
-  extractCurrentContent();
-  console.log(`After extraction: ${conversationData.messages.length} messages found`);
-  
-  // Log details about extracted messages
-  conversationData.messages.forEach((message, index) => {
-    console.log(`Message ${index + 1}: Speaker=${message.speaker}, Items=${message.items?.length || 0}`);
-    
-    // Log types of items
-    if (message.items?.length > 0) {
-      const types = message.items.map(item => item.type);
-      console.log(`  Item types: ${types.join(', ')}`);
+function getCodeLanguage(preElement) {
+  const classes = preElement.className.split(' ');
+  for (const cls of classes) {
+    if (cls.startsWith('language-')) {
+      return cls.replace('language-', '');
     }
-  });
-  
-  // Create a copy of the data to return
-  const data = {
-    title: conversationData.title,
-    messages: [...conversationData.messages]
-  };
-  
-  console.log(`Sending ${data.messages.length} messages to popup`);
-  return data;
+  }
+  return '';
 }
 
 /**
@@ -503,57 +315,18 @@ function imageToDataURL(imgSrc) {
 function sanitizeTextForPDF(text) {
   if (!text) return '';
   
-  // 1. Remove problematic special characters
-  let cleaned = text
-    .replace(/â€¢/g, '')  // Remove corrupted bullet
-    .replace(/€¢/g, '')   // Remove corrupted character
-    .replace(/Ø>/g, '')   // Remove special character
-    .replace(/Ø=Û¥/g, '') // Remove special character sequence
-    .replace(/&™b/g, '')  // Remove special character
-    .replace(/â€¢ €¢/g, '') // Remove combined corruption
-    .replace(/â€¹/g, '')   // Remove corrupted character
-    .replace(/\u2028/g, ' ') // Line separator
-    .replace(/\u2029/g, ' '); // Paragraph separator
-  
-  // 2. Fix spaced out text like "N e w t o n ' s"
-  if (cleaned.includes(' e ') || cleaned.includes(' a ') || cleaned.match(/[A-Z]\s+[a-z]\s+[a-z]/)) {
-    cleaned = cleaned
-      .replace(/([A-Za-z])\s+([A-Za-z])\s+([A-Za-z])/g, '$1$2$3')
-      .replace(/([A-Za-z])\s+([A-Za-z])/g, '$1$2');
+  // Remove any script-like content
+  if (text.includes('window.') || 
+      text.includes('document.') || 
+      text.includes('function(')) {
+    return '';
   }
   
-  // 3. Fix text without spaces
-  if (cleaned.length > 20 && !cleaned.includes(' ')) {
-    cleaned = cleaned
-      .replace(/([a-z])([A-Z])/g, '$1 $2')
-      .replace(/([a-zA-Z])(\d)/g, '$1 $2')
-      .replace(/(\d)([a-zA-Z])/g, '$1 $2')
-      .replace(/([.:;,!?])([A-Za-z])/g, '$1 $2');
-  }
-  
-  // 4. Fix common physics/math content spacing
-  cleaned = cleaned
-    .replace(/Newton'ssecondlawsays/g, "Newton's second law says")
-    .replace(/Force=mass/g, "Force = mass")
-    .replace(/\bF=ma\b/g, "F = ma")
-    .replace(/Itcomesfrom/g, "It comes from")
-    .replace(/forceisthe/g, "force is the")
-    .replace(/rateofchange/g, "rate of change")
-    .replace(/ofmomentum/g, "of momentum")
-    .replace(/Ifyouwant/g, "If you want")
-    .replace(/Therefore,F=ma/g, "Therefore, F = ma");
-  
-  // 5. Standardize bullet points
-  if (cleaned.startsWith('•') || cleaned.startsWith('-')) {
-    cleaned = '• ' + cleaned.substring(1).trim();
-  }
-  
-  // 6. Final cleanup
-  cleaned = cleaned
-    .replace(/\s+/g, ' ')  // normalize multiple spaces to single space
+  // Basic cleanup
+  return text
+    .replace(/\s+/g, ' ')    // Normalize whitespace
+    .replace(/\n+/g, ' ')    // Replace newlines with spaces
     .trim();
-  
-  return cleaned;
 }
 
 /**
@@ -614,4 +387,236 @@ function formatEquation(equation) {
     .trim();
     
   return formatted;
-} 
+}
+
+function isValidContent(text) {
+  if (!text) return false;
+  
+  const unwantedPatterns = [
+    'window.__oai',
+    'window._oai',
+    'request Animation Frame',
+    'Search Reason',
+    'HTML?window',
+    'SSR_HTML',
+    'TTI?window',
+    'Date.now()',
+    'undefined'
+  ];
+  
+  text = text.trim();
+  return text.length > 0 && 
+         !unwantedPatterns.some(pattern => text.includes(pattern)) &&
+         !/^[\s\d.]+$/.test(text); // Skip if only numbers/spaces/dots
+}
+
+// Add this function to content.js
+function getConversationData() {
+  debugLog('Getting conversation data for PDF generation');
+  // Reset any previous messages and update title
+  conversationData.messages = [];
+  updateConversationTitle();
+  debugLog('Title:', conversationData.title);
+  
+  // Run structured extraction to populate messages
+  extractCurrentContent();
+  debugLog(`After structured pass, found ${conversationData.messages.length} messages`);
+  
+  // --- Structured extraction logic ---
+  // (find mainContainer, messageGroups, call processMessageBlock as before)
+  // e.g.:
+  // const mainContainer = document.querySelector('div[class*="react-scroll-to-bottom"], div[class*="flex-1 overflow-hidden"]');
+  // if (mainContainer) { /* process messageGroups */ }
+  
+  // FALLBACK: if no structured messages, grab entire page text
+  if (conversationData.messages.length === 0) {
+    debugLog('No structured messages found – falling back to plain text');
+    const raw = document.body.innerText.trim();
+    if (raw) {
+      conversationData.messages.push({
+        speaker: 'ChatGPT Conversation',
+        timestamp: new Date().toLocaleTimeString(),
+        items: [{ type: 'text', content: sanitizeTextForPDF(raw) }]
+      });
+    }
+  }
+
+  // Always return at least one message
+  return {
+    title:    conversationData.title,
+    messages: [...conversationData.messages]
+  };
+}
+
+// Update the message processing function
+function processMessageBlock(block, index) {
+  debugLog(`Processing message block ${index}`);
+
+  try {
+    // Skip if already processed
+    if (block.classList.contains('processed')) {
+      return;
+    }
+
+    // Mark as processed
+    block.classList.add('processed');
+
+    // Determine speaker (user vs assistant)
+    let isUser = false;
+    const userRoleEl = block.querySelector('[data-message-author-role="user"]');
+    if (userRoleEl) {
+      isUser = true;
+    } else {
+      const parentRole = block.closest('[data-message-author-role]');
+      if (parentRole) {
+        isUser = parentRole.getAttribute('data-message-author-role') === 'user';
+      } else if (block.classList.contains('dark:bg-gray-800')) {
+        isUser = true;
+      }
+    }
+    const speaker = isUser ? 'User' : 'Assistant';
+    const timestamp = new Date().toLocaleTimeString();
+
+    // Extract conversation elements in order (headers, paragraphs, lists, code, tables, images, equations)
+    const items = [];
+    const segs = block.querySelectorAll(
+      'h1,h2,h3,h4,h5,h6,' +
+      'p,' +
+      'ul,ol,' +
+      'pre,' +
+      'table,' +
+      'img,' +
+      'span.katex'
+    );
+    debugLog('Block segments count:', segs.length);
+    segs.forEach(el => {
+      try {
+        const tag = el.tagName;
+        if (/^H[1-6]$/.test(tag) || tag === 'P') {
+          // Text block
+          const txt = el.innerText.trim();
+          if (txt) {
+            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
+            debugLog('Text:', txt);
+          }
+        } else if (tag === 'UL' || tag === 'OL') {
+          // List
+          Array.from(el.children).forEach(li => {
+            const txt = li.innerText.trim();
+            if (txt) {
+              items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt) });
+              debugLog('List item:', txt);
+            }
+          });
+        } else if (tag === 'PRE') {
+          // Code block
+          const code = el.querySelector('code');
+          if (code) {
+            const content = code.textContent.trim();
+            const language = getCodeLanguage(el);
+            items.push({ type: 'code', content, language });
+            debugLog('Code block:', language);
+          }
+        } else if (tag === 'TABLE') {
+          // Table
+          const headers = Array.from(el.querySelectorAll('thead th')).map(th => th.innerText.trim());
+          const rows = Array.from(el.querySelectorAll('tbody tr')).map(tr =>
+            Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim())
+          );
+          items.push({ type: 'table', headers, rows });
+          debugLog('Table rows:', rows.length);
+        } else if (tag === 'IMG') {
+          // Image
+          const src = el.src;
+          if (src) {
+            items.push({ type: 'image', content: src });
+            debugLog('Image:', src);
+          }
+        } else if (el.classList.contains('katex')) {
+          // Equation
+          const latex = el.getAttribute('data-latex') || el.textContent.trim();
+          if (latex) {
+            items.push({ type: 'equation', content: latex });
+            debugLog('Equation:', latex);
+          }
+        }
+      } catch (err) {
+        console.warn('Segment error:', err);
+      }
+    });
+
+    // Add message if it has content
+    if (items.length > 0) {
+      conversationData.messages.push({ speaker, timestamp, items });
+      debugLog(`Added ${speaker} message with ${items.length} items`);
+    }
+  } catch (error) {
+    debugLog(`Error processing message block ${index}:`, error);
+  }
+}
+
+// Add this helper function
+function getCodeLanguage(preElement) {
+  if (!preElement) return '';
+  
+  const classes = preElement.className.split(' ');
+  for (const cls of classes) {
+    if (cls.startsWith('language-')) {
+      return cls.replace('language-', '');
+    }
+  }
+  return '';
+}
+
+// Update the sanitizeTextForPDF function
+function sanitizeTextForPDF(text) {
+  if (!text) return '';
+  
+  // Remove any script-like content
+  if (text.includes('window.') || 
+      text.includes('document.') || 
+      text.includes('function(')) {
+    return '';
+  }
+  
+  // Basic cleanup
+  let cleaned = text
+    .replace(/\s+/g, ' ')    // Normalize whitespace
+    .replace(/\n+/g, ' ')    // Replace newlines with spaces
+    .replace(/\\n/g, ' ')    // Replace literal \n
+    .trim();
+  
+  // Remove any empty or whitespace-only content
+  if (!cleaned || /^\s*$/.test(cleaned)) {
+    return '';
+  }
+  
+  return cleaned;
+}
+
+// Add this to help with debugging
+function logDOMStructure() {
+  debugLog('=== DOM Structure Analysis ===');
+  
+  const mainContainer = document.querySelector('div[class*="react-scroll-to-bottom"]');
+  debugLog('Main container found:', !!mainContainer);
+  
+  if (mainContainer) {
+    const messageGroups = mainContainer.querySelectorAll('div[class*="group w-full"]');
+    debugLog('Message groups found:', messageGroups.length);
+    
+    const textElements = mainContainer.querySelectorAll('div[class*="markdown"]');
+    debugLog('Text elements found:', textElements.length);
+    
+    const codeBlocks = mainContainer.querySelectorAll('pre code');
+    debugLog('Code blocks found:', codeBlocks.length);
+  }
+  
+  debugLog('=== End DOM Analysis ===');
+}
+
+// Call this when initializing
+document.addEventListener('DOMContentLoaded', () => {
+  debugLog('Content script initializing...');
+  logDOMStructure();
+}); 

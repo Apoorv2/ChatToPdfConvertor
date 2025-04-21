@@ -41,22 +41,40 @@ const loadedTabs = new Set();
 
 // Execute content script when navigating to ChatGPT pages
 chrome.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
-  // Make sure tab and tab.url are defined before checking includes
-  if (changeInfo.status === 'complete' && tab && tab.url) {
-    // Now safely check if we're on a ChatGPT page
-    if (tab.url.includes('chat.openai.com') || tab.url.includes('chatgpt.com')) {
-      console.log('ChatGPT page loaded, injecting content script');
+  if (changeInfo.status === 'complete' && tab?.url) {
+    // Check for both possible ChatGPT domains
+    const isChatGPT = tab.url.includes('chat.openai.com') || 
+                     tab.url.includes('chatgpt.com');
+                     
+    if (isChatGPT) {
+      console.log('Injecting scripts into ChatGPT page...');
       
-      // Forcibly inject the content script
+      // Inject scripts in sequence
       chrome.scripting.executeScript({
-        target: {tabId: tabId},
+        target: { tabId: tabId },
         files: ['content.js']
       })
       .then(() => {
-        console.log('Content script injected successfully');
-        loadedTabs.add(tabId);
+        console.log('Content script injected');
+        return chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          files: ['injected-script.js']
+        });
       })
-      .catch(err => console.error('Error injecting script:', err));
+      .then(() => {
+        console.log('Injected script loaded');
+        // Set a flag in storage that scripts are ready
+        return chrome.storage.local.set({
+          scriptStatus: {
+            tabId: tabId,
+            ready: true,
+            timestamp: Date.now()
+          }
+        });
+      })
+      .catch(err => {
+        console.error('Script injection error:', err);
+      });
     }
   }
 });

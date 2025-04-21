@@ -36,115 +36,99 @@ document.addEventListener('DOMContentLoaded', function() {
   checkExportCount();
   
   // Add click event listener to the generate button
-  generateButton.addEventListener('click', generatePDF);
+  generateButton.addEventListener('click', async () => {
+    try {
+      const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+      if (!tab) {
+        showStatus("Error: No active tab found");
+        return;
+      }
+      
+      // Ensure content script is loaded
+      await ensureContentScript(tab.id);
+      
+      // Generate PDF
+      await generatePDF();
+    } catch (error) {
+      console.error('Error:', error);
+      showStatus("Error: " + error.message);
+    }
+  });
   
   /**
    * Generate PDF from conversation data
    */
-  function generatePDF() {
+  async function generatePDF() {
     console.log('Generate PDF button clicked');
     clearError();
     
     try {
-      // Get the active tab
-      chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-        if (!tabs || !tabs.length) {
-          showStatus("Error: No active tab found");
-          return;
-        }
-        
-        const activeTab = tabs[0];
-        
-        // Check if we're on a ChatGPT page
-        if (!activeTab.url.includes('chat.openai.com') && !activeTab.url.includes('chatgpt.com')) {
-          showStatus("This extension only works on ChatGPT pages");
-          return;
-        }
-        
-        // Show the user that we're working
-        showStatus("Generating PDF...");
-        
-        // Request content using the injected script approach
-        console.log('Using injected script to extract content');
-        chrome.scripting.executeScript({
-          target: { tabId: activeTab.id },
-          files: ['injector.js']
-        }).then(function(result) {
-          console.log('Injector script executed successfully');
-          
-          // Send message to the injected script with a different action name
-          chrome.tabs.sendMessage(activeTab.id, {
-            type: 'FROM_EXTENSION',
-            action: 'extractContentDirect'
-          }, function(response) {
-            // Check for response from injected script (may not come this way)
-            if (response) {
-              console.log('Direct response from injected script:', response);
-              createPDF(response.data);
-            } else {
-              // Check storage for data from background script
-              setTimeout(function() {
-                chrome.storage.local.get(['chatContent'], function(result) {
-                  if (result.chatContent) {
-                    console.log('Got content from storage:', result.chatContent);
-                    
-                    // Debug the structure
-                    console.log('chatContent structure:', {
-                      hasAction: result.chatContent.action,
-                      type: result.chatContent.type,
-                      topLevelKeys: Object.keys(result.chatContent)
-                    });
-                    
-                    // If we have content extraction data with messages
-                    if (result.chatContent.action === 'contentExtracted' && result.chatContent.messages) {
-                      console.log('Found content data with messages:', result.chatContent.messages.length);
-                      
-                      // Create data object
-                      const dataToUse = {
-                        title: result.chatContent.title || 'ChatGPT Conversation',
-                        messages: result.chatContent.messages
-                      };
-                      
-                      createPDF(dataToUse);
-                      return;
-                    } else {
-                      // Handle case when only script loaded notification is present
-                      console.log('No content data found, only script loaded notification');
-                      
-                      // Wait a bit longer and try again
-                      setTimeout(function() {
-                        chrome.storage.local.get(['chatContent'], function(secondResult) {
-                          if (secondResult.chatContent && 
-                              secondResult.chatContent.action === 'contentExtracted' && 
-                              secondResult.chatContent.messages) {
-                            
-                            console.log('Found content data in second attempt');
-                            const dataToUse = {
-                              title: secondResult.chatContent.title || 'ChatGPT Conversation',
-                              messages: secondResult.chatContent.messages
-                            };
-                            
-                            createPDF(dataToUse);
-                          } else {
-                            showStatus("Error: Could not extract conversation content. Try refreshing the page.");
-                          }
-                        });
-                      }, 3000); // Wait 3 more seconds for extraction to complete
-                    }
-                  } else {
-                    showStatus("Error: No content received from page. Try refreshing.");
-                  }
-                });
-              }, 1000); // Wait 1 second for data to arrive
-            }
-          });
-        }).catch(function(error) {
-          console.error('Error executing script:', error);
-          showStatus("Error: Cannot inject script. Try refreshing the page.");
+      const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+      if (!tab) {
+        showStatus("Error: No active tab found");
+        return;
+      }
+      
+      const url = tab.url || '';
+      if (!url.includes('chat.openai.com') && !url.includes('chatgpt.com')) {
+        showStatus("This extension only works on ChatGPT pages");
+        return;
+      }
+      
+      showStatus("Preparing PDF generation...");
+      
+      // Clear any existing content
+      await chrome.storage.local.remove(['chatContent']);
+      
+      // First, inject content script
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content.js']
+      });
+      
+      console.log('Content script injected');
+      
+      // Add delay to ensure script initialization
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Send extraction message and wait for response
+      const response = await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(tab.id, {
+          type: 'FROM_EXTENSION',
+          action: 'extractContentDirect'
+        }, response => {
+          if (chrome.runtime.lastError) {
+            reject(chrome.runtime.lastError);
+          } else {
+            resolve(response);
+          }
         });
       });
+      
+      console.log('Extraction response:', response);
+      
+      // Check if extraction was successful
+      if (!response || !response.success) {
+        throw new Error(response?.error || 'Extraction failed');
+      }
+      
+      // Wait for storage to be updated
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Get data from storage
+      const result = await chrome.storage.local.get(['chatContent']);
+      console.log('Retrieved from storage:', result);
+      
+      if (!result.chatContent || !result.chatContent.messages || result.chatContent.messages.length === 0) {
+        console.error('No content found in storage:', result);
+        throw new Error('No conversation content found');
+      }
+      
+      // Create PDF with the data
+      await createPDF(result.chatContent);
+      
     } catch (error) {
-      console.error("Error generating PDF:", error);
+      console.error('PDF generation error:', error);
       showStatus("Error: " + error.message);
     }
   }
@@ -152,34 +136,31 @@ document.addEventListener('DOMContentLoaded', function() {
   /**
    * Create a PDF with conversation content
    */
-  function createPDF(data) {
+  async function createPDF(data) {
     try {
       console.log("===== PDF GENERATION START =====");
       console.log('Raw data received:', data);
       
-      if (!data) {
+      if (!data || !Array.isArray(data.messages)) {
         console.error('===== PDF GENERATION ERROR =====');
-        console.error('No data received');
-        showStatus("Error: No conversation data received");
+        showStatus("Error: Invalid conversation data");
         return;
       }
       
-      if (!data.messages || !Array.isArray(data.messages)) {
-        console.error('===== PDF GENERATION ERROR =====');
-        console.error('Invalid messages array:', data.messages);
-        showStatus("Error: Invalid message format in conversation");
-        return;
-      }
+      // Pre-process messages: dedupe and format
+      const messages = processMessagesForPDF(data.messages);
+      console.log(`Preparing to render ${messages.length} messages`);
       
-      // Create PDF document
+      // Initialize PDF document
       console.log('Initializing PDF document...');
       const doc = createPDFWithUnicodeSupport();
-      
-      // Set up page parameters
+      // Set up page parameters and log
       const pageWidth = doc.internal.pageSize.width;
       const pageHeight = doc.internal.pageSize.height;
       const margin = 20;
       const contentWidth = pageWidth - 2 * margin;
+      console.log(`Page size: ${pageWidth.toFixed(2)} x ${pageHeight.toFixed(2)}, margin: ${margin}`);
+      console.log(`Content width: ${contentWidth.toFixed(2)}`);
       
       // Add title
       const title = data.title || 'ChatGPT Conversation';
@@ -199,20 +180,21 @@ document.addEventListener('DOMContentLoaded', function() {
       // Start position for messages
       let yPosition = margin + 20;
       
-      // Render each message using our enhanced rendering function
-      console.log(`Rendering ${data.messages.length} messages`);
+      // Render each message
+      console.log(`Rendering ${messages.length} messages`);
       
-      for (let i = 0; i < data.messages.length; i++) {
+      for (let i = 0; i < messages.length; i++) {
+        console.log(`-- Rendering message #${i+1}: speaker=${messages[i].speaker}, items=${messages[i].items.length}`);
         // Check for page break before rendering
         if (yPosition > pageHeight - margin) {
           doc.addPage();
           yPosition = margin;
         }
         
-        // Render the message using our custom function
-        yPosition = renderMessage(doc, data.messages[i], yPosition, contentWidth);
+        // Render the message
+        yPosition = await renderMessage(doc, messages[i], yPosition, contentWidth);
         
-        console.log(`Rendered message ${i+1}/${data.messages.length}, new Y: ${yPosition}`);
+        console.log(`Rendered message ${i+1}/${messages.length}, new Y: ${yPosition}`);
       }
       
       // Generate the final PDF
@@ -619,12 +601,12 @@ document.addEventListener('DOMContentLoaded', function() {
   testButton.addEventListener('click', testPDF);
 });
 
-function renderMessage(doc, message, startY, maxWidth) {
+async function renderMessage(doc, message, startY, maxWidth) {
   console.log('Rendering message:', message.speaker);
   
   // Set up styling based on speaker
   const userColor = [0, 0, 0]; // Black
-  const chatgptColor = [16/255, 163/255, 127/255]; // ChatGPT green - #10a37f
+  const chatgptColor = [16/255, 163/255, 127/255]; // ChatGPT green
   
   // Choose text color based on speaker
   const textColor = message.speaker === 'User' ? userColor : chatgptColor;
@@ -647,30 +629,34 @@ function renderMessage(doc, message, startY, maxWidth) {
   doc.setFontSize(10);
   doc.setTextColor(0, 0, 0); // Reset to black
   
-  // Process each content item
   let currentY = startY;
   
+  // Process each content item
   for (const item of message.items) {
+    // Add spacing between items
+    if (currentY > startY) {
+      currentY += 5;
+    }
+    
     if (item.type === 'text') {
-      // Handle regular text
+      // Handle regular text with proper line breaks
       const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
       doc.text(textLines, 15, currentY);
-      currentY += textLines.length * 5 + 5;
-    } 
-    else if (item.type === 'code') {
+      currentY += textLines.length * 5 + 3;
+    } else if (item.type === 'code') {
       // Handle code blocks with background
       const codeLines = doc.splitTextToSize(item.content, maxWidth - 25);
       
       // Draw background for code
       const codeHeight = codeLines.length * 5 + 10;
-      doc.setFillColor(240, 240, 240); // Light gray background
+      doc.setFillColor(240, 240, 240);
       doc.rect(12, currentY - 3, maxWidth - 14, codeHeight, 'F');
       
       // Add language label if detected
       if (item.language && item.language !== 'code' && item.language !== 'plaintext') {
         doc.setFont('helvetica', 'italic');
         doc.setFontSize(8);
-        doc.setTextColor(100, 100, 100); // Gray
+        doc.setTextColor(100, 100, 100);
         doc.text(item.language, 15, currentY);
         currentY += 4;
       }
@@ -687,11 +673,86 @@ function renderMessage(doc, message, startY, maxWidth) {
       
       // Move down past code block
       currentY += codeHeight + 5;
+    } else if (item.type === 'image') {
+      // Embed image
+      try {
+        const src = item.content;
+        const dataURL = src.startsWith('data:') ? src : await imageToDataURL(src);
+        // Calculate dimensions to fit half width
+        const imgProps = doc.getImageProperties(dataURL);
+        const imgWidth = maxWidth * 0.5;
+        const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+        doc.addImage(dataURL, 'JPEG', 15, currentY, imgWidth, imgHeight);
+        currentY += imgHeight + 5;
+      } catch (e) {
+        console.warn('Failed to add image:', e);
+      }
+    } else if (item.type === 'table') {
+      // Render table using autoTable
+      doc.autoTable({
+        startY: currentY,
+        head: [item.headers || []],
+        body: item.rows || [],
+        margin: { left: 15, right: 15 },
+        theme: 'grid',
+        styles: { fontSize: 8 }
+      });
+      currentY = doc.lastAutoTable.finalY + 5;
+    } else if (item.type === 'equation') {
+      // Render equation as plain text
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      const eqText = `Equation: ${item.content}`;
+      const lines = doc.splitTextToSize(eqText, maxWidth - 20);
+      doc.text(lines, 15, currentY);
+      currentY += lines.length * 5 + 3;
     }
   }
   
   // Add spacing after message
-  currentY += 10;
+  currentY += 8;
   
-  return currentY; // Return the new Y position
+  return currentY;
+}
+
+// Add this helper function to check script status
+async function checkContentScript(tabId) {
+  try {
+    const response = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+        } else {
+          resolve(response?.status === 'pong');
+        }
+      });
+    });
+    
+    return response;
+  } catch (error) {
+    console.error('Error checking content script:', error);
+    return false;
+  }
+}
+
+// Add this function to ensure script is ready
+async function ensureContentScript(tabId) {
+  const isLoaded = await checkContentScript(tabId);
+  if (!isLoaded) {
+    console.log('Content script not found, injecting...');
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js']
+    });
+    
+    // Wait for script to initialize
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Verify script is now loaded
+    const verified = await checkContentScript(tabId);
+    if (!verified) {
+      throw new Error('Failed to initialize content script');
+    }
+  }
+  return true;
 } 
