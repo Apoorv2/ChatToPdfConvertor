@@ -158,10 +158,9 @@ document.addEventListener('DOMContentLoaded', function() {
       const pageWidth = doc.internal.pageSize.width;
       const pageHeight = doc.internal.pageSize.height;
       const margin = 20;
-      const bottomMargin = margin * 2; // leave extra space at bottom
-      const contentWidth = pageWidth - 2 * margin;
+      const bottomMargin = margin;
       console.log(`Page size: ${pageWidth.toFixed(2)} x ${pageHeight.toFixed(2)}, margin: ${margin}`);
-      console.log(`Content width: ${contentWidth.toFixed(2)}`);
+      console.log(`Content width: ${pageWidth - 2 * margin}`);
       
       // Add title
       const title = data.title || 'ChatGPT Conversation';
@@ -186,14 +185,14 @@ document.addEventListener('DOMContentLoaded', function() {
       
       for (let i = 0; i < messages.length; i++) {
         console.log(`-- Rendering message #${i+1}: speaker=${messages[i].speaker}, items=${messages[i].items.length}`);
-        // Check for page break before rendering to leave bottom margin
+        // Break page if we exceed bottom margin
         if (yPosition > pageHeight - bottomMargin) {
           doc.addPage();
           yPosition = margin;
         }
         
         // Render the message
-        yPosition = await renderMessage(doc, messages[i], yPosition, contentWidth);
+        yPosition = await renderMessage(doc, messages[i], yPosition, pageWidth - 2 * margin);
         
         console.log(`Rendered message ${i+1}/${messages.length}, new Y: ${yPosition}`);
       }
@@ -241,12 +240,10 @@ document.addEventListener('DOMContentLoaded', function() {
       
       message.items.forEach(item => {
         if (item.type === 'text') {
-          // Skip empty or duplicate text
-          const txt = item.content;
+          // Skip empty, duplicate, or UI labels ('You said:', 'ChatGPT said:')
+          const txt = item.content.trim();
           if (!txt || seenText.has(txt)) return;
-          // If there's a bullet version of this text, skip the plain version
-          const bullet = '• ' + txt;
-          if (seenText.has(bullet)) return;
+          if (/^You said:?$/i.test(txt) || /^ChatGPT said:?$/i.test(txt)) return;
           seenText.add(txt);
           processedItems.push(item);
         } 
@@ -616,13 +613,23 @@ async function renderMessage(doc, message, startY, maxWidth) {
   // Choose text color based on speaker
   const textColor = message.speaker === 'User' ? userColor : chatgptColor;
   
+  // Get page height for page break detection
+  const pageHeight = doc.internal.pageSize.height;
+  const marginBottom = 20; // Bottom margin to avoid cutting content
+  
   // Draw speaker with timestamp
   doc.setTextColor(...textColor);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
   
-  const timestamp = message.timestamp ? ` (${message.timestamp})` : '';
-  const speakerText = `${message.speaker}${timestamp}`;
+  // Check if we need a new page before starting the message
+  if (startY > pageHeight - 50) { // Need at least 50pt for header
+    doc.addPage();
+    startY = 20; // Reset to top of new page
+  }
+  
+  // Map 'Assistant' label to 'ChatGPT'
+  const speakerText = message.speaker === 'Assistant' ? 'ChatGPT' : message.speaker;
   
   doc.text(speakerText, 10, startY);
   
@@ -635,11 +642,113 @@ async function renderMessage(doc, message, startY, maxWidth) {
   doc.setTextColor(0, 0, 0); // Reset to black
   
   let currentY = startY;
+  let isFirstItemOnPage = true;
   
   // Process each content item
   for (const item of message.items) {
-    // Add spacing between items
-    if (currentY > startY) {
+    // First, calculate how much space this item will need
+    let itemHeight = 0;
+    
+    if (item.type === 'text') {
+      // Estimate text height - most jsPDF versions don't support direct dimension measurement
+      const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
+      const isBullet = item.content.trim().startsWith('•');
+      const lineSpacing = isBullet ? 3 : 5;
+      const extra = isBullet ? 2 : 3;
+      itemHeight = textLines.length * lineSpacing + extra + 5; // +5 for item spacing
+    } else if (item.type === 'code') {
+      // For code blocks, use a light grey background and monospace font
+      doc.setFont('courier');
+      doc.setFontSize(8);
+      
+      // Clean up whitespace - trim trailing whitespace from each line and remove empty lines at end
+      let trimmedContent = item.content.trim().split('\n').map(line => 
+        line.replace(/\s+$/, '')
+      );
+      
+      // Remove any trailing empty lines
+      while(trimmedContent.length > 0 && trimmedContent[trimmedContent.length-1] === '') {
+        trimmedContent.pop();
+      }
+      
+      const lines = trimmedContent;
+      let maxLineWidth = 0;
+      
+      // Find the longest line for width calculation
+      lines.forEach(line => {
+        const lineWidth = doc.getTextWidth(line);
+        maxLineWidth = Math.max(maxLineWidth, lineWidth);
+      });
+      
+      // Set padding (reduced for a more compact look)
+      const topPadding = 2;
+      const bottomPadding = 2;
+      const sidePadding = 3;
+      
+      // Calculate total dimensions with optimized line height
+      const blockWidth = maxLineWidth + (sidePadding * 2);
+      const lineHeight = doc.getTextDimensions('M').h * 1.05; // Further reduced multiplier
+      const blockHeight = (lines.length * lineHeight) + topPadding + bottomPadding;
+      
+      // Check if we need a page break
+      if (currentY + blockHeight > pageHeight - 20) {
+        doc.addPage();
+        currentY = 20;
+        console.log('[PDF DEBUG] Added page break before code block');
+      }
+      
+      // Draw background
+      doc.setFillColor(245, 245, 245);
+      doc.rect(20, currentY, blockWidth, blockHeight, 'F');
+      
+      // Draw code text
+      doc.setTextColor(0, 0, 0);
+      lines.forEach((line, i) => {
+        const yPos = currentY + topPadding + (i * lineHeight) + (lineHeight * 0.7);
+        doc.text(line, 20 + sidePadding, yPos);
+      });
+      
+      // Reset font and advance Y position
+      doc.setFont('helvetica');
+      doc.setFontSize(10);
+      
+      // Use minimal spacing after code blocks
+      currentY += blockHeight + 1; // Minimal spacing after code blocks
+      console.log('[PDF DEBUG] Code block rendered with dimensions:', {maxLineWidth, blockWidth, blockHeight, lines: lines.length});
+    } else if (item.type === 'image') {
+      // Rough estimate for images
+      itemHeight = (maxWidth * 0.5 * 0.75) + 5; // Assuming width:height ratio of 4:3 and 50% width
+    } else if (item.type === 'table') {
+      // Tables are harder to estimate - just use a minimum height
+      itemHeight = 50;
+    } else if (item.type === 'equation') {
+      const eqText = `Equation: ${item.content}`;
+      const lines = doc.splitTextToSize(eqText, maxWidth - 20);
+      itemHeight = lines.length * 7 + 15; // 7pt per line, 15 for spacing
+    }
+    
+    // Check if we need a page break before this item
+    if (!isFirstItemOnPage && currentY + itemHeight > pageHeight - marginBottom) {
+      doc.addPage();
+      currentY = 20; // Reset to top of page
+      
+      // Repeat the speaker on the new page for context
+      doc.setTextColor(...textColor);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text(`${speakerText} (continued)`, 10, currentY);
+      
+      // Reset font for content
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(0, 0, 0);
+      
+      currentY += 10; // Space after speaker header
+      isFirstItemOnPage = true;
+    }
+
+    // Add spacing between items on same page
+    if (currentY > startY && !isFirstItemOnPage) {
       currentY += 5;
     }
     
@@ -652,36 +761,6 @@ async function renderMessage(doc, message, startY, maxWidth) {
       const lineSpacing = isBullet ? 3 : 5;
       const extra = isBullet ? 2 : 3;
       currentY += textLines.length * lineSpacing + extra;
-    } else if (item.type === 'code') {
-      // Handle code blocks with background
-      const codeLines = doc.splitTextToSize(item.content, maxWidth - 25);
-      
-      // Draw background for code
-      const codeHeight = codeLines.length * 5 + 10;
-      doc.setFillColor(240, 240, 240);
-      doc.rect(12, currentY - 3, maxWidth - 14, codeHeight, 'F');
-      
-      // Add language label if detected
-      if (item.language && item.language !== 'code' && item.language !== 'plaintext') {
-        doc.setFont('helvetica', 'italic');
-        doc.setFontSize(8);
-        doc.setTextColor(100, 100, 100);
-        doc.text(item.language, 15, currentY);
-        currentY += 4;
-      }
-      
-      // Draw code with monospace font
-      doc.setFont('courier', 'normal');
-      doc.setFontSize(9);
-      doc.setTextColor(0, 0, 0);
-      doc.text(codeLines, 15, currentY);
-      
-      // Reset font
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      
-      // Move down past code block
-      currentY += codeHeight + 5;
     } else if (item.type === 'image') {
       // Embed image
       try {
@@ -708,18 +787,26 @@ async function renderMessage(doc, message, startY, maxWidth) {
       });
       currentY = doc.lastAutoTable.finalY + 5;
     } else if (item.type === 'equation') {
-      // Render equation as plain text
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
+      // Render equation as centered, italicized text with prefix 'Equation:'
       const eqText = `Equation: ${item.content}`;
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(12);
+      // Split to fit page width
       const lines = doc.splitTextToSize(eqText, maxWidth - 20);
-      doc.text(lines, 15, currentY);
-      currentY += lines.length * 5 + 3;
+      const pageWidth = doc.internal.pageSize.width;
+      lines.forEach((line, i) => {
+        const y = currentY + i * 7;
+        doc.text(line, pageWidth / 2, y, { align: 'center' });
+      });
+      currentY += lines.length * 7 + 10; // extra spacing after equation
     }
+    
+    // Item rendered, no longer first on page
+    isFirstItemOnPage = false;
   }
   
   // Add spacing after message
-  currentY += 8;
+  currentY += 5; // Reduced from 8 to 5 for better document flow
   
   return currentY;
 }

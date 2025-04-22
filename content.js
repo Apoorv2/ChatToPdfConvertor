@@ -452,37 +452,24 @@ function getConversationData() {
 // Update the message processing function
 function processMessageBlock(block, index) {
   debugLog(`Processing message block ${index}`);
-
   try {
-    // Skip if already processed
-    if (block.classList.contains('processed')) {
-      return;
-    }
-
-    // Mark as processed
+    if (block.classList.contains('processed')) return;
     block.classList.add('processed');
-
-    // Determine speaker (user vs assistant)
     let isUser = false;
     const userRoleEl = block.querySelector('[data-message-author-role="user"]');
-    if (userRoleEl) {
-      isUser = true;
-    } else {
+    if (userRoleEl) isUser = true;
+    else {
       const parentRole = block.closest('[data-message-author-role]');
-      if (parentRole) {
-        isUser = parentRole.getAttribute('data-message-author-role') === 'user';
-      } else if (block.classList.contains('dark:bg-gray-800')) {
-        isUser = true;
-      }
+      if (parentRole) isUser = parentRole.getAttribute('data-message-author-role') === 'user';
+      else if (block.classList.contains('dark:bg-gray-800')) isUser = true;
     }
     const speaker = isUser ? 'User' : 'Assistant';
     const timestamp = new Date().toLocaleTimeString();
-
-    // Extract conversation elements in order (headers, paragraphs, lists, code, tables, images, equations)
     const items = [];
     const segs = block.querySelectorAll(
       'h1,h2,h3,h4,h5,h6,' +
       'p,' +
+      'div[class*="markdown"],div[class*="text-base"],' +
       'ul,ol,' +
       'pre,' +
       'table,' +
@@ -491,17 +478,99 @@ function processMessageBlock(block, index) {
     );
     debugLog('Block segments count:', segs.length);
     segs.forEach(el => {
+      // 1) Extract code blocks first
+      if (el.tagName === 'PRE') {
+        const codeEl = el.querySelector('code');
+        if (codeEl) {
+          const content = codeEl.textContent.trim();
+          const language = getCodeLanguage(el);
+          items.push({ type: 'code', content, language });
+          debugLog('Code block found:', language, content);
+        }
+        return;
+      }
+      // 2) Extract markdown/text-base paragraphs & lists, but skip if contains code
+      if (el.tagName === 'DIV' && (el.className.includes('markdown') || el.className.includes('text-base'))) {
+        // Instead of treating entire div as plain text, extract its structure properly
+        debugLog('Processing structured markdown container...');
+        
+        // Check for headings first (h1-h6)
+        el.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+          const txt = heading.innerText.trim();
+          if (txt) {
+            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
+            debugLog('Heading:', txt);
+          }
+        });
+        
+        // Extract paragraphs that aren't inside other elements we handle separately
+        const paragraphs = Array.from(el.querySelectorAll('p'))
+          .filter(p => !p.closest('pre, ol, ul'));
+        
+        paragraphs.forEach(p => {
+          const txt = p.innerText.trim();
+          if (txt) {
+            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
+            debugLog('Paragraph:', txt);
+          }
+        });
+        
+        // Process lists and their items carefully
+        el.querySelectorAll('ol, ul').forEach(list => {
+          // Skip if already inside a processed list
+          if (list.closest('ol, ul') !== list) return;
+          
+          Array.from(list.querySelectorAll('li')).forEach(li => {
+            // Only process direct children of this list
+            if (li.closest('ol, ul') !== list) return;
+            
+            const txt = li.innerText.trim();
+            if (txt) {
+              items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt) });
+              debugLog('List item:', txt);
+            }
+          });
+        });
+        
+        // Find any loose text nodes or spans not in elements we've already processed
+        const directTextContainers = Array.from(el.querySelectorAll('div'))
+          .filter(div => {
+            // Skip divs that contain elements we handle separately
+            return !div.querySelector('pre, code, h1, h2, h3, h4, h5, h6, p, ol, ul, table');
+          });
+        
+        directTextContainers.forEach(container => {
+          const txt = container.innerText.trim();
+          if (txt) {
+            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
+            debugLog('Direct text container:', txt);
+          }
+        });
+        
+        // Find all code blocks nested inside this markdown container
+        el.querySelectorAll('pre code').forEach(code => {
+          // Skip if we've already processed this PRE (parent) element
+          if (code.closest('pre').classList.contains('processed')) return;
+          
+          const pre = code.closest('pre');
+          pre.classList.add('processed');
+          const content = code.textContent.trim();
+          const language = getCodeLanguage(pre);
+          items.push({ type: 'code', content, language });
+          debugLog('Nested code block found:', language, content);
+        });
+        
+        return;
+      }
       try {
         const tag = el.tagName;
         if (/^H[1-6]$/.test(tag) || tag === 'P') {
-          // Text or paragraph
           const txt = el.innerText.trim();
           if (txt) {
             items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
             debugLog('Text:', txt);
           }
         } else if (tag === 'UL' || tag === 'OL') {
-          // List items
           Array.from(el.children).forEach(li => {
             const txt = li.innerText.trim();
             if (txt) {
@@ -509,17 +578,7 @@ function processMessageBlock(block, index) {
               debugLog('List item:', txt);
             }
           });
-        } else if (tag === 'PRE') {
-          // Code block
-          const codeEl = el.querySelector('code');
-          if (codeEl) {
-            const content = codeEl.textContent.trim();
-            const language = getCodeLanguage(el);
-            items.push({ type: 'code', content, language });
-            debugLog('Code block:', language);
-          }
         } else if (tag === 'TABLE') {
-          // Table: sanitize headers and cell content
           const headers = Array.from(el.querySelectorAll('thead th'))
             .map(th => sanitizeTextForPDF(th.innerText.trim()))
             .filter(h => h);
@@ -530,14 +589,12 @@ function processMessageBlock(block, index) {
           items.push({ type: 'table', headers, rows });
           debugLog('Table rows:', rows.length);
         } else if (tag === 'IMG') {
-          // Image
           const src = el.src;
           if (src) {
             items.push({ type: 'image', content: src });
             debugLog('Image:', src);
           }
         } else if (el.classList.contains('katex')) {
-          // KaTeX-rendered equation
           const latex = el.getAttribute('data-latex');
           if (latex) {
             items.push({ type: 'equation', content: latex.trim() });
@@ -548,8 +605,6 @@ function processMessageBlock(block, index) {
         console.warn('Segment error:', err);
       }
     });
-
-    // Add message if it has content
     if (items.length > 0) {
       conversationData.messages.push({ speaker, timestamp, items });
       debugLog(`Added ${speaker} message with ${items.length} items`);
