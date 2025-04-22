@@ -314,19 +314,16 @@ function imageToDataURL(imgSrc) {
  */
 function sanitizeTextForPDF(text) {
   if (!text) return '';
-  
   // Remove any script-like content
-  if (text.includes('window.') || 
-      text.includes('document.') || 
-      text.includes('function(')) {
+  if (text.includes('window.') || text.includes('document.') || text.includes('function(')) {
     return '';
   }
-  
-  // Basic cleanup
-  return text
-    .replace(/\s+/g, ' ')    // Normalize whitespace
-    .replace(/\n+/g, ' ')    // Replace newlines with spaces
-    .trim();
+  // Strip out non-ASCII and control characters (keep printable ASCII 0x20-0x7E)
+  const cleaned = text.replace(/[^\x20-\x7E]+/g, ' ')
+                      // Collapse whitespace
+                      .replace(/\s+/g, ' ')
+                      .trim();
+  return cleaned;
 }
 
 /**
@@ -518,10 +515,13 @@ function processMessageBlock(block, index) {
             debugLog('Code block:', language);
           }
         } else if (tag === 'TABLE') {
-          // Table
-          const headers = Array.from(el.querySelectorAll('thead th')).map(th => th.innerText.trim());
+          // Table: sanitize headers and cell content
+          const headers = Array.from(el.querySelectorAll('thead th'))
+            .map(th => sanitizeTextForPDF(th.innerText.trim()))
+            .filter(h => h);
           const rows = Array.from(el.querySelectorAll('tbody tr')).map(tr =>
-            Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim())
+            Array.from(tr.querySelectorAll('td'))
+              .map(td => sanitizeTextForPDF(td.innerText.trim()))
           );
           items.push({ type: 'table', headers, rows });
           debugLog('Table rows:', rows.length);
@@ -533,11 +533,11 @@ function processMessageBlock(block, index) {
             debugLog('Image:', src);
           }
         } else if (el.classList.contains('katex')) {
-          // Equation
-          const latex = el.getAttribute('data-latex') || el.textContent.trim();
+          // Equation: only include if data-latex is present
+          const latex = el.getAttribute('data-latex');
           if (latex) {
-            items.push({ type: 'equation', content: latex });
-            debugLog('Equation:', latex);
+            items.push({ type: 'equation', content: latex.trim() });
+            debugLog('KaTeX equation:', latex);
           }
         }
       } catch (err) {
@@ -566,32 +566,6 @@ function getCodeLanguage(preElement) {
     }
   }
   return '';
-}
-
-// Update the sanitizeTextForPDF function
-function sanitizeTextForPDF(text) {
-  if (!text) return '';
-  
-  // Remove any script-like content
-  if (text.includes('window.') || 
-      text.includes('document.') || 
-      text.includes('function(')) {
-    return '';
-  }
-  
-  // Basic cleanup
-  let cleaned = text
-    .replace(/\s+/g, ' ')    // Normalize whitespace
-    .replace(/\n+/g, ' ')    // Replace newlines with spaces
-    .replace(/\\n/g, ' ')    // Replace literal \n
-    .trim();
-  
-  // Remove any empty or whitespace-only content
-  if (!cleaned || /^\s*$/.test(cleaned)) {
-    return '';
-  }
-  
-  return cleaned;
 }
 
 // Add this to help with debugging
