@@ -158,6 +158,7 @@ document.addEventListener('DOMContentLoaded', function() {
       const pageWidth = doc.internal.pageSize.width;
       const pageHeight = doc.internal.pageSize.height;
       const margin = 20;
+      const bottomMargin = margin * 2; // leave extra space at bottom
       const contentWidth = pageWidth - 2 * margin;
       console.log(`Page size: ${pageWidth.toFixed(2)} x ${pageHeight.toFixed(2)}, margin: ${margin}`);
       console.log(`Content width: ${contentWidth.toFixed(2)}`);
@@ -185,8 +186,8 @@ document.addEventListener('DOMContentLoaded', function() {
       
       for (let i = 0; i < messages.length; i++) {
         console.log(`-- Rendering message #${i+1}: speaker=${messages[i].speaker}, items=${messages[i].items.length}`);
-        // Check for page break before rendering
-        if (yPosition > pageHeight - margin) {
+        // Check for page break before rendering to leave bottom margin
+        if (yPosition > pageHeight - bottomMargin) {
           doc.addPage();
           yPosition = margin;
         }
@@ -241,8 +242,12 @@ document.addEventListener('DOMContentLoaded', function() {
       message.items.forEach(item => {
         if (item.type === 'text') {
           // Skip empty or duplicate text
-          if (!item.content || seenText.has(item.content)) return;
-          seenText.add(item.content);
+          const txt = item.content;
+          if (!txt || seenText.has(txt)) return;
+          // If there's a bullet version of this text, skip the plain version
+          const bullet = '• ' + txt;
+          if (seenText.has(bullet)) return;
+          seenText.add(txt);
           processedItems.push(item);
         } 
         else if (item.type === 'equation') {
@@ -639,10 +644,14 @@ async function renderMessage(doc, message, startY, maxWidth) {
     }
     
     if (item.type === 'text') {
-      // Handle regular text with proper line breaks
+      // Handle regular text and bullet lists with proper line breaks
       const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
       doc.text(textLines, 15, currentY);
-      currentY += textLines.length * 5 + 3;
+      // Tighten bullet list spacing
+      const isBullet = item.content.trim().startsWith('•');
+      const lineSpacing = isBullet ? 3 : 5;
+      const extra = isBullet ? 2 : 3;
+      currentY += textLines.length * lineSpacing + extra;
     } else if (item.type === 'code') {
       // Handle code blocks with background
       const codeLines = doc.splitTextToSize(item.content, maxWidth - 25);

@@ -177,10 +177,14 @@ function extractCurrentContent() {
     debugLog('extractCurrentContent: generic min-h- found:', blocks.length);
   }
 
-  // Process each block
+  // Process each block, skipping duplicates
   let count = 0;
+  let lastBlockText = '';
   blocks.forEach((block, idx) => {
     if (!isValidMessageBlock(block)) return;
+    const text = block.innerText.trim();
+    if (text && text === lastBlockText) return; // skip duplicate block
+    lastBlockText = text;
     processMessageBlock(block, idx);
     count++;
   });
@@ -490,14 +494,14 @@ function processMessageBlock(block, index) {
       try {
         const tag = el.tagName;
         if (/^H[1-6]$/.test(tag) || tag === 'P') {
-          // Text block
+          // Text or paragraph
           const txt = el.innerText.trim();
           if (txt) {
             items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
             debugLog('Text:', txt);
           }
         } else if (tag === 'UL' || tag === 'OL') {
-          // List
+          // List items
           Array.from(el.children).forEach(li => {
             const txt = li.innerText.trim();
             if (txt) {
@@ -507,9 +511,9 @@ function processMessageBlock(block, index) {
           });
         } else if (tag === 'PRE') {
           // Code block
-          const code = el.querySelector('code');
-          if (code) {
-            const content = code.textContent.trim();
+          const codeEl = el.querySelector('code');
+          if (codeEl) {
+            const content = codeEl.textContent.trim();
             const language = getCodeLanguage(el);
             items.push({ type: 'code', content, language });
             debugLog('Code block:', language);
@@ -533,7 +537,7 @@ function processMessageBlock(block, index) {
             debugLog('Image:', src);
           }
         } else if (el.classList.contains('katex')) {
-          // Equation: only include if data-latex is present
+          // KaTeX-rendered equation
           const latex = el.getAttribute('data-latex');
           if (latex) {
             items.push({ type: 'equation', content: latex.trim() });
