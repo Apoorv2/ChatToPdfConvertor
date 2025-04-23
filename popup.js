@@ -617,7 +617,7 @@ async function renderMessage(doc, message, startY, maxWidth) {
   const pageHeight = doc.internal.pageSize.height;
   const marginBottom = 20; // Bottom margin to avoid cutting content
   
-  // Draw speaker with timestamp
+  // Draw speaker with timestamp - only at the beginning of the message
   doc.setTextColor(...textColor);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
@@ -643,6 +643,7 @@ async function renderMessage(doc, message, startY, maxWidth) {
   
   let currentY = startY;
   let isFirstItemOnPage = true;
+  let isFirstPage = true; // Track if we're on the first page of this message
   
   // Process each content item
   for (const item of message.items) {
@@ -669,6 +670,30 @@ async function renderMessage(doc, message, startY, maxWidth) {
       // Remove any trailing empty lines
       while(trimmedContent.length > 0 && trimmedContent[trimmedContent.length-1] === '') {
         trimmedContent.pop();
+      }
+      
+      // More aggressive removal of common headers in code blocks
+      // Check first 1-2 lines for language indicators, "Copy Edit", or short commands
+      if (trimmedContent.length > 0) {
+        // Check if first line is a common language indicator or command
+        const firstLine = trimmedContent[0].trim().toLowerCase();
+        if (
+          /^(java|python|javascript|js|typescript|ts|html|css|c\+\+|c#|ruby|go|rust|php|swift|kotlin|sql|shell|bash|powershell|json|yaml|xml|markdown|plaintext|text)$/i.test(firstLine) || 
+          /^copy\s+edit$/i.test(firstLine) ||
+          /^copy$/i.test(firstLine) || 
+          /^edit$/i.test(firstLine) ||
+          /^\d{1,2}o$/i.test(firstLine) // Matches patterns like "4o"
+        ) {
+          trimmedContent.shift(); // Remove the first line
+        }
+        
+        // Also check second line if it looks like a command
+        if (trimmedContent.length > 0) {
+          const secondLine = trimmedContent[0].trim().toLowerCase();
+          if (/^(copy|edit)$/i.test(secondLine)) {
+            trimmedContent.shift(); // Remove the line
+          }
+        }
       }
       
       const lines = trimmedContent;
@@ -716,15 +741,120 @@ async function renderMessage(doc, message, startY, maxWidth) {
       currentY += blockHeight + 1; // Minimal spacing after code blocks
       console.log('[PDF DEBUG] Code block rendered with dimensions:', {maxLineWidth, blockWidth, blockHeight, lines: lines.length});
     } else if (item.type === 'image') {
-      // Rough estimate for images
-      itemHeight = (maxWidth * 0.5 * 0.75) + 5; // Assuming width:height ratio of 4:3 and 50% width
+      // Embed image
+      try {
+        const src = item.content;
+        console.log('Processing image in renderMessage:', src);
+        
+        // Create a new image element
+        const img = new Image();
+        img.crossOrigin = 'anonymous'; // Try to avoid CORS issues
+        
+        // Set onload handler
+        await new Promise((resolve, reject) => {
+          img.onload = function() {
+            try {
+              console.log('Image loaded with dimensions:', img.width, 'x', img.height);
+              
+              // Create a canvas to draw the image
+              const canvas = document.createElement('canvas');
+              canvas.width = img.width;
+              canvas.height = img.height;
+              
+              // Draw the image to canvas
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              
+              // Get data URL
+              const dataURL = canvas.toDataURL('image/jpeg', 0.95);
+              
+              // Calculate dimensions to fit the page width - REDUCE SIZE
+              const maxImgWidth = maxWidth * 0.5; // Reduced from 0.8 to 0.5 (50% of page width)
+              
+              // Also enforce a maximum height for very tall images
+              const maxImgHeight = pageHeight * 0.4; // Maximum 40% of page height
+              
+              // Calculate width based on width constraint
+              const imgWidth = Math.min(img.width, maxImgWidth);
+              let imgHeight = (img.height * imgWidth) / img.width;
+              
+              // If height exceeds maximum, recalculate dimensions
+              if (imgHeight > maxImgHeight) {
+                imgHeight = maxImgHeight;
+                // Recalculate width to maintain aspect ratio
+                const recalcWidth = (img.width * imgHeight) / img.height;
+                // Use the smaller of the recalculated width or the maxImgWidth
+                const finalWidth = Math.min(recalcWidth, maxImgWidth);
+                
+                // Apply the final dimensions
+                doc.addImage(dataURL, 'JPEG', 20, currentY, finalWidth, imgHeight);
+              } else {
+                // Use the originally calculated dimensions
+                doc.addImage(dataURL, 'JPEG', 20, currentY, imgWidth, imgHeight);
+              }
+              
+              // Add 10pt padding after the image
+              currentY += imgHeight + 10;
+              resolve();
+            } catch (e) {
+              console.error('Error processing image for PDF:', e);
+              currentY += 5; // Skip ahead anyway
+              resolve();
+            }
+          };
+          
+          img.onerror = function(e) {
+            console.error('Failed to load image:', e);
+            currentY += 5; // Skip ahead anyway
+            resolve();
+          };
+          
+          // Start loading the image
+          img.src = src;
+        });
+      } catch (e) {
+        console.warn('Failed to add image:', e);
+        currentY += 5;
+      }
     } else if (item.type === 'table') {
       // Tables are harder to estimate - just use a minimum height
       itemHeight = 50;
     } else if (item.type === 'equation') {
-      const eqText = `Equation: ${item.content}`;
-      const lines = doc.splitTextToSize(eqText, maxWidth - 20);
-      itemHeight = lines.length * 7 + 15; // 7pt per line, 15 for spacing
+      // Render equation as centered, italicized text with prefix 'Equation:'
+      
+      // Fix common equation formatting issues with minimal changes
+      let eqContent = item.content;
+      
+      // Fix specific issues
+      eqContent = eqContent
+        .replace(/d([a-z])\s+d([a-z])/gi, 'd$1/d$2') // Fix "dp dt" to "dp/dt"
+        .replace(/^\s*=\s*/, '') // Remove leading equals sign like "= p=mv"
+        .replace(/Therefore,\s*=/, 'Therefore,') // Fix "Therefore, ="
+        .replace(/p=mv/, 'p = mv'); // Add spaces in p=mv
+      
+      // Only add equation prefix if not already containing math terms
+      const eqText = eqContent.trim();
+      
+      // Use italic font and slightly larger size
+      doc.setFont('helvetica', 'italic');
+      doc.setFontSize(12);
+      
+      // Center text with proper width
+      const lines = doc.splitTextToSize(eqText, maxWidth - 30);
+      const pageWidth = doc.internal.pageSize.width;
+      
+      // Center aligned text
+      lines.forEach((line, i) => {
+        const y = currentY + i * 7;
+        doc.text(line, pageWidth / 2, y, { align: 'center' });
+      });
+      
+      // Add spacing after equation
+      currentY += lines.length * 7 + 10;
+      
+      // Reset font
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
     }
     
     // Check if we need a page break before this item
@@ -732,11 +862,20 @@ async function renderMessage(doc, message, startY, maxWidth) {
       doc.addPage();
       currentY = 20; // Reset to top of page
       
-      // Repeat the speaker on the new page for context
-      doc.setTextColor(...textColor);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(11);
-      doc.text(`${speakerText} (continued)`, 10, currentY);
+      // Only show speaker name on first page of the message, not on continuation pages
+      if (isFirstPage) {
+        // We've now moved to a second page for this message
+        isFirstPage = false;
+      } else {
+        // Skip showing the speaker name on continuation pages
+        // Just reset fonts and continue
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.setTextColor(0, 0, 0);
+        currentY += 5; // Just add a small space at top of page
+        isFirstItemOnPage = true;
+        continue;
+      }
       
       // Reset font for content
       doc.setFont('helvetica', 'normal');
@@ -786,19 +925,6 @@ async function renderMessage(doc, message, startY, maxWidth) {
         styles: { fontSize: 8 }
       });
       currentY = doc.lastAutoTable.finalY + 5;
-    } else if (item.type === 'equation') {
-      // Render equation as centered, italicized text with prefix 'Equation:'
-      const eqText = `Equation: ${item.content}`;
-      doc.setFont('helvetica', 'italic');
-      doc.setFontSize(12);
-      // Split to fit page width
-      const lines = doc.splitTextToSize(eqText, maxWidth - 20);
-      const pageWidth = doc.internal.pageSize.width;
-      lines.forEach((line, i) => {
-        const y = currentY + i * 7;
-        doc.text(line, pageWidth / 2, y, { align: 'center' });
-      });
-      currentY += lines.length * 7 + 10; // extra spacing after equation
     }
     
     // Item rendered, no longer first on page
