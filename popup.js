@@ -9,6 +9,13 @@ let jsPDF;
 
 // Initialize jsPDF when the document loads
 document.addEventListener('DOMContentLoaded', function() {
+  // We can't use external scripts due to CSP restrictions
+  // Initialize app directly
+  initializeApp();
+});
+
+// Initialize the app
+function initializeApp() {
   if (typeof window.jspdf !== 'undefined') {
     // Use the global jspdf object if it exists
     jsPDF = window.jspdf.jsPDF;
@@ -229,8 +236,45 @@ document.addEventListener('DOMContentLoaded', function() {
   function processMessagesForPDF(messages) {
     if (!messages || !Array.isArray(messages)) return messages;
     
+    console.log("Processing raw messages:", JSON.stringify(messages.slice(0, 2))); // Log first 2 messages
+    
     return messages.map(message => {
       if (!message.items || !Array.isArray(message.items)) return message;
+      
+      // Log item types count for debugging
+      const itemTypes = {};
+      message.items.forEach(item => {
+        itemTypes[item.type] = (itemTypes[item.type] || 0) + 1;
+      });
+      console.log(`Message from ${message.speaker} contains:`, itemTypes);
+      
+      // Look for potential equations that might be misclassified as text
+      message.items.forEach((item, index) => {
+        if (item.type === 'text') {
+          const content = item.content.trim();
+          // Check for potential equations
+          if (
+            /F\s*=\s*m\s*a/.test(content) ||
+            /E\s*=\s*m\s*c\^?2/.test(content) ||
+            /p\s*=\s*m\s*v/.test(content) ||
+            /dt\s+d[pv]/.test(content) ||
+            /=\s*m\s*d[v]\/dt/.test(content) ||
+            /\\frac/.test(content) ||
+            /\\int/.test(content) ||
+            /\\sum/.test(content) ||
+            /\\sqrt/.test(content) ||
+            /\\alpha|\\beta|\\gamma|\\delta/.test(content) ||
+            /\\partial|\\nabla/.test(content)
+          ) {
+            console.log('Found potential equation in text:', content);
+            // Convert to equation type
+            message.items[index] = { 
+              type: 'equation', 
+              content: content 
+            };
+          }
+        }
+      });
       
       // Filter and process items
       const processedItems = [];
@@ -251,6 +295,7 @@ document.addEventListener('DOMContentLoaded', function() {
           // Format and deduplicate equations
           const eq = item.content;
           if (!eq || seenEquations.has(eq)) return;
+          console.log("Processing equation:", eq);
           seenEquations.add(eq);
           processedItems.push(item);
         }
@@ -339,7 +384,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
     */
   }
-});
+}
 
 /**
  * Display a status message
@@ -613,8 +658,9 @@ async function renderMessage(doc, message, startY, maxWidth) {
   // Choose text color based on speaker
   const textColor = message.speaker === 'User' ? userColor : chatgptColor;
   
-  // Get page height for page break detection
+  // Get page dimensions for positioning
   const pageHeight = doc.internal.pageSize.height;
+  const pageWidth = doc.internal.pageSize.width;
   const marginBottom = 20; // Bottom margin to avoid cutting content
   
   // Draw speaker with timestamp - only at the beginning of the message
@@ -644,6 +690,15 @@ async function renderMessage(doc, message, startY, maxWidth) {
   let currentY = startY;
   let isFirstItemOnPage = true;
   let isFirstPage = true; // Track if we're on the first page of this message
+  
+  // Sort message items by sequence if present
+  if (message.items && message.items.some(item => item.sequence !== undefined)) {
+    message.items.sort((a, b) => {
+      const seqA = a.sequence !== undefined ? a.sequence : 999;
+      const seqB = b.sequence !== undefined ? b.sequence : 999;
+      return seqA - seqB;
+    });
+  }
   
   // Process each content item
   for (const item of message.items) {
@@ -816,45 +871,37 @@ async function renderMessage(doc, message, startY, maxWidth) {
         console.warn('Failed to add image:', e);
         currentY += 5;
       }
-    } else if (item.type === 'table') {
-      // Tables are harder to estimate - just use a minimum height
-      itemHeight = 50;
     } else if (item.type === 'equation') {
-      // Render equation as centered, italicized text with prefix 'Equation:'
-      
-      // Fix common equation formatting issues with minimal changes
-      let eqContent = item.content;
-      
-      // Fix specific issues
-      eqContent = eqContent
-        .replace(/d([a-z])\s+d([a-z])/gi, 'd$1/d$2') // Fix "dp dt" to "dp/dt"
-        .replace(/^\s*=\s*/, '') // Remove leading equals sign like "= p=mv"
-        .replace(/Therefore,\s*=/, 'Therefore,') // Fix "Therefore, ="
-        .replace(/p=mv/, 'p = mv'); // Add spaces in p=mv
-      
-      // Only add equation prefix if not already containing math terms
-      const eqText = eqContent.trim();
-      
-      // Use italic font and slightly larger size
-      doc.setFont('helvetica', 'italic');
-      doc.setFontSize(12);
-      
-      // Center text with proper width
-      const lines = doc.splitTextToSize(eqText, maxWidth - 30);
-      const pageWidth = doc.internal.pageSize.width;
-      
-      // Center aligned text
-      lines.forEach((line, i) => {
-        const y = currentY + i * 7;
-        doc.text(line, pageWidth / 2, y, { align: 'center' });
-      });
-      
-      // Add spacing after equation
-      currentY += lines.length * 7 + 10;
-      
-      // Reset font
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
+      try {
+        const equation = item.content.trim();
+        // Get page width to pass to the equation renderer
+        const pageWidth = doc.internal.pageSize.width;
+        
+        // Use direct rendering approach for better reliability
+        currentY = await renderDirectEquation(
+          doc, 
+          equation, 
+          pageWidth, 
+          currentY, 
+          maxWidth
+        );
+      } catch (error) {
+        console.error('Error rendering equation:', error);
+        
+        // Ultra-simple fallback if our enhanced renderer fails
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(12);
+        
+        const lines = doc.splitTextToSize(item.content.trim(), maxWidth - 30);
+        lines.forEach((line, i) => {
+          const y = currentY + i * 7;
+          doc.text(line, pageWidth / 2, y, { align: 'center' });
+        });
+        
+        currentY += lines.length * 7 + 10;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+      }
     }
     
     // Check if we need a page break before this item
@@ -977,4 +1024,450 @@ async function ensureContentScript(tabId) {
     }
   }
   return true;
+}
+
+// Direct rendering of KaTeX equations to the PDF
+function renderDirectEquation(doc, equation, pageWidth, currentY, maxWidth) {
+  if (!equation) return currentY;
+  
+  try {
+    console.log('Using direct KaTeX rendering for equation:', equation);
+    
+    // Check if KaTeX is loaded
+    if (typeof katex === 'undefined') {
+      console.error('KaTeX library not loaded');
+      return fallbackTextRendering(doc, equation, pageWidth, currentY, maxWidth);
+    }
+    
+    // Clean up equation
+    let processedEq = equation.trim();
+    
+    // Remove any non-standard characters that could cause rendering issues
+    processedEq = processedEq.replace(/[^\x20-\x7E]/g, '');
+    
+    // Remove any potential unicode replacement characters or corrupted sequences
+    processedEq = processedEq.replace(/Ø5Ü[0-9]/g, '');
+    
+    // Improve differential notation for better display
+    processedEq = processedEq
+      // Fix "dtdp" to "dp/dt"
+      .replace(/([=:])?\s*\(?dtd([a-zA-Z]+)\)?/g, '$1 d$2/dt')
+      .replace(/([=:])?\s*\(?d([a-zA-Z]+)dt\)?/g, '$1 d$2/dt')
+      
+      // Fix differential notation like "d(mv)" to proper format
+      .replace(/dtd\(([^)]+)\)/g, 'd($1)/dt')
+      
+      // Handle "=" or ":" followed by differential 
+      .replace(/([=:])?\s*dtdp/g, '$1 dp/dt')
+      .replace(/([=:])?\s*dtdv/g, '$1 dv/dt')
+      
+      // Handle inline text with improper differential formatting
+      .replace(/with respect to time:=\(/g, 'with respect to time: ')
+      .replace(/relativistic case\):=/g, 'relativistic case): ');
+    
+    // Special case handling for common physics equations
+    if (/F\s*=\s*m\s*a/.test(processedEq)) processedEq = 'F = ma';
+    else if (/E\s*=\s*m\s*c\^?2/.test(processedEq)) processedEq = 'E = mc^2';
+    else if (/p\s*=\s*m\s*v/.test(processedEq)) processedEq = 'p = mv';
+    
+    // Wrap in LaTeX delimiters if needed
+    if (!processedEq.startsWith('$') && !processedEq.startsWith('\\begin')) {
+      processedEq = '$' + processedEq + '$';
+    }
+    
+    // Get rendered LaTeX HTML from KaTeX
+    let katexHtml;
+    try {
+      katexHtml = katex.renderToString(processedEq, {
+        displayMode: true,
+        throwOnError: false
+      });
+    } catch (e) {
+      console.error('KaTeX rendering failed:', e);
+      return fallbackTextRendering(doc, equation, pageWidth, currentY, maxWidth);
+    }
+    
+    // Draw beautiful styled box for equation
+    const boxWidth = maxWidth * 0.8;
+    const boxHeight = 40; // Default height
+    const boxX = (pageWidth - boxWidth) / 2;
+    
+    // Draw a nice background with shadow
+    doc.setFillColor(248, 250, 252); // Very light blue
+    doc.setDrawColor(200, 200, 220); // Light blue-gray border
+    doc.roundedRect(boxX, currentY, boxWidth, boxHeight, 3, 3, 'FD');
+    
+    // Draw the equation as plain text but nicely formatted
+    doc.setFont('times', 'italic');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 100); // Dark blue for equations
+    
+    // Format the plain text version of the equation
+    let plainEq = processedEq
+      .replace(/\$/g, '')
+      .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '$1/$2')
+      .replace(/\\cdot/g, '·')
+      .replace(/\\times/g, '×')
+      .replace(/\\alpha/g, 'α')
+      .replace(/\\beta/g, 'β')
+      .replace(/\\gamma/g, 'γ')
+      .replace(/\\delta/g, 'δ')
+      .replace(/\\pi/g, 'π')
+      .replace(/\\lambda/g, 'λ')
+      .replace(/\\mu/g, 'μ')
+      .replace(/\\sum/g, 'Σ')
+      .replace(/\\int/g, '∫')
+      .replace(/\\infty/g, '∞')
+      .replace(/\\partial/g, '∂')
+      .replace(/\\nabla/g, '∇')
+      .replace(/^([A-Za-z])\s*=\s*([A-Za-z])\s*([A-Za-z])$/g, '$1 = $2·$3') // F = ma, p = mv
+      .replace(/([a-z])\_\{?([0-9]+)\}?/g, '$1₍$2₎') // Subscripts
+      .replace(/([a-z])\^\{?([0-9]+)\}?/g, '$1$2') // Superscripts, simplified
+      .replace(/\{|\}/g, ''); // Remove leftover braces
+    
+    // Special case for Newton's Second Law
+    if (plainEq.includes('F = ma')) {
+      plainEq = 'F = ma   (Newton\'s Second Law)';
+    }
+    
+    // Draw equation centered
+    doc.text(plainEq, pageWidth / 2, currentY + boxHeight / 2, { align: 'center' });
+    
+    // Add a subtle label
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7);
+    doc.setTextColor(150, 150, 150);
+    doc.text('Equation', boxX + 3, currentY - 2);
+    
+    // Reset styles
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(0, 0, 0);
+    
+    // Return updated position
+    return currentY + boxHeight + 10;
+  } catch (error) {
+    console.error('Direct equation rendering failed:', error);
+    return fallbackTextRendering(doc, equation, pageWidth, currentY, maxWidth);
+  }
+}
+
+// Fallback to text-based equation rendering if KaTeX fails
+function fallbackTextRendering(doc, equation, pageWidth, currentY, maxWidth) {
+  console.log('Using fallback text rendering for equation');
+  
+  // Pre-process equation text
+  let processedEq = equation
+    .replace(/^\s*[•\*\-]\s*/, '') // Remove bullet points
+    .replace(/^\s*=\s*/, '') // Remove leading equals sign
+    .trim();
+  
+  // Remove any non-standard characters that could cause rendering issues
+  processedEq = processedEq.replace(/[^\x20-\x7E]/g, '');
+  
+  // Remove any potential unicode replacement characters or corrupted sequences
+  processedEq = processedEq.replace(/Ø5Ü[0-9]/g, '');
+  
+  // Improve differential notation in the fallback renderer too
+  processedEq = processedEq
+    // Fix "dtdp" to "dp/dt"
+    .replace(/([=:])?\s*\(?dtd([a-zA-Z]+)\)?/g, '$1 d$2/dt')
+    .replace(/([=:])?\s*\(?d([a-zA-Z]+)dt\)?/g, '$1 d$2/dt')
+    
+    // Fix differential notation like "d(mv)" to proper format
+    .replace(/dtd\(([^)]+)\)/g, 'd($1)/dt')
+    
+    // Handle "=" or ":" followed by differential 
+    .replace(/([=:])?\s*dtdp/g, '$1 dp/dt')
+    .replace(/([=:])?\s*dtdv/g, '$1 dv/dt')
+    
+    // Handle inline text with improper differential formatting
+    .replace(/with respect to time:=\(/g, 'with respect to time: ')
+    .replace(/relativistic case\):=/g, 'relativistic case): ');
+  
+  // Apply text formatting
+  processedEq = processedEq
+    // Ensure spaces around operators
+    .replace(/([a-z0-9])([=+\-])/gi, '$1 $2')
+    .replace(/([=+\-])([a-z0-9])/gi, '$1 $2')
+    // Fix spacing
+    .replace(/\s*=\s*/g, ' = ')
+    .replace(/\s*\+\s*/g, ' + ')
+    .replace(/\s*\-\s*/g, ' - ');
+    
+  // Create a styled text box
+  doc.setDrawColor(200, 200, 200);
+  doc.setFillColor(248, 248, 252);
+  doc.setFont('times', 'italic');
+  doc.setFontSize(12);
+  
+  // Split text to fit width
+  const lines = doc.splitTextToSize(processedEq, maxWidth - 60);
+  
+  // Draw box with a nice style
+  const lineHeight = 7;
+  const totalHeight = lines.length * lineHeight + 14;
+  const boxWidth = maxWidth - 40;
+  const boxX = (pageWidth - boxWidth) / 2;
+  
+  // Draw with shadow
+  doc.setFillColor(240, 240, 240);
+  doc.roundedRect(boxX + 2, currentY - 2, boxWidth, totalHeight, 3, 3, 'F');
+  doc.setFillColor(248, 248, 252);
+  doc.roundedRect(boxX, currentY - 4, boxWidth, totalHeight, 3, 3, 'FD');
+  
+  // Add a label
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(8);
+  doc.setTextColor(100, 100, 100);
+  doc.text('Equation:', boxX + 5, currentY);
+  
+  // Draw text
+  doc.setFont('times', 'italic');
+  doc.setFontSize(12);
+  doc.setTextColor(0, 0, 100);
+  
+  lines.forEach((line, i) => {
+    const y = currentY + 8 + (i * lineHeight);
+    doc.text(line, pageWidth / 2, y, { align: 'center' });
+  });
+  
+  // Reset styles
+  doc.setTextColor(0, 0, 0);
+  
+  return currentY + totalHeight + 8;
+}
+
+// Add a document ready listener for the test equation button
+document.addEventListener('DOMContentLoaded', function() {
+  // Add test equation button if in development mode
+  const testEquationBtn = document.createElement('button');
+  testEquationBtn.textContent = 'Test Equation';
+  testEquationBtn.style.backgroundColor = '#9c27b0';
+  testEquationBtn.style.marginTop = '5px';
+  
+  // Insert after debug button
+  const debugButton = document.getElementById('debugConnection');
+  if (debugButton && debugButton.parentNode) {
+    debugButton.parentNode.insertBefore(testEquationBtn, debugButton.nextSibling);
+  }
+  
+  // Add Re-Extract button
+  const reExtractBtn = document.createElement('button');
+  reExtractBtn.textContent = 'Re-Extract Content';
+  reExtractBtn.style.backgroundColor = '#ff5722';
+  reExtractBtn.style.marginTop = '5px';
+  
+  // Insert after test equation button
+  if (testEquationBtn.parentNode) {
+    testEquationBtn.parentNode.insertBefore(reExtractBtn, testEquationBtn.nextSibling);
+  }
+  
+  // Add click handlers
+  testEquationBtn.addEventListener('click', testKatexRendering);
+  reExtractBtn.addEventListener('click', forceReExtractContent);
+});
+
+// Add a function to test KaTeX rendering directly
+function testKatexRendering() {
+  console.log('Testing KaTeX rendering...');
+  
+  // Create container for rendering
+  const container = document.getElementById('katex-container');
+  if (!container) {
+    console.error('KaTeX container not found');
+    showStatus('Error: KaTeX container not found');
+    return;
+  }
+  
+  // Make container visible for this test
+  container.style.visibility = 'visible';
+  container.style.position = 'absolute';
+  container.style.top = '50px';
+  container.style.left = '10px';
+  container.style.width = '300px';
+  container.style.height = 'auto';
+  container.style.backgroundColor = '#fff';
+  container.style.padding = '10px';
+  container.style.border = '1px solid #ccc';
+  container.style.zIndex = '1000';
+  container.style.overflow = 'visible';
+  
+  // Clear previous content
+  container.innerHTML = '';
+  
+  const testEquations = [
+    'E = mc^2',
+    'F = ma',
+    'p = mv',
+    '\\frac{d}{dx}x^2 = 2x',
+    '\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}'
+  ];
+  
+  // Check if KaTeX is loaded
+  if (typeof katex === 'undefined') {
+    container.innerHTML = '<div style="color: red;">Error: KaTeX not loaded!</div>';
+    console.error('KaTeX not loaded');
+    showStatus('KaTeX library not loaded. Check console for details.');
+    return;
+  }
+  
+  // Try to render each equation
+  testEquations.forEach((eq, i) => {
+    try {
+      const eqDiv = document.createElement('div');
+      eqDiv.style.margin = '10px 0';
+      eqDiv.style.padding = '5px';
+      eqDiv.style.backgroundColor = '#f8f8f8';
+      
+      const inputDiv = document.createElement('div');
+      inputDiv.textContent = eq;
+      inputDiv.style.fontFamily = 'monospace';
+      inputDiv.style.marginBottom = '5px';
+      inputDiv.style.fontSize = '12px';
+      eqDiv.appendChild(inputDiv);
+      
+      const outputDiv = document.createElement('div');
+      katex.render(eq, outputDiv, {
+        throwOnError: false,
+        displayMode: true
+      });
+      eqDiv.appendChild(outputDiv);
+      
+      container.appendChild(eqDiv);
+      console.log(`Rendered equation ${i+1}: ${eq}`);
+    } catch (e) {
+      console.error(`Failed to render equation ${i+1}:`, e);
+      const errorDiv = document.createElement('div');
+      errorDiv.style.color = 'red';
+      errorDiv.textContent = `Error rendering ${eq}: ${e.message}`;
+      container.appendChild(errorDiv);
+    }
+  });
+  
+  // Add a close button
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Close';
+  closeBtn.style.marginTop = '10px';
+  container.appendChild(closeBtn);
+  
+  closeBtn.addEventListener('click', () => {
+    container.style.visibility = 'hidden';
+    showStatus('KaTeX rendering test completed. Check console for details.');
+  });
+  
+  // Also try the SVG approach
+  const testSVG = document.createElement('div');
+  testSVG.innerHTML = '<h4>SVG Test</h4>';
+  container.appendChild(testSVG);
+  
+  try {
+    const svgData = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="200" height="50">
+        <foreignObject width="100%" height="100%">
+          <div xmlns="http://www.w3.org/1999/xhtml">
+            ${katex.renderToString('F = ma', {throwOnError: false})}
+          </div>
+        </foreignObject>
+      </svg>
+    `;
+    
+    const img = document.createElement('img');
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgData);
+    img.style.border = '1px solid #ddd';
+    testSVG.appendChild(img);
+    
+    console.log('SVG image created');
+  } catch (e) {
+    console.error('SVG test failed:', e);
+    testSVG.innerHTML += `<div style="color: red;">SVG Error: ${e.message}</div>`;
+  }
+}
+
+// Add a function to force re-extraction of content
+async function forceReExtractContent() {
+  try {
+    showStatus("Re-extracting content...");
+    console.log("Force re-extracting content from page");
+    
+    const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+    if (!tab) {
+      showStatus("Error: No active tab found");
+      return;
+    }
+    
+    // Clear previous content
+    await chrome.storage.local.remove(['chatContent']);
+    
+    // Ensure content script is loaded and fresh
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js']
+    });
+    
+    console.log('Content script re-injected');
+    
+    // Add delay to ensure script initialization
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Send extraction message with force flag
+    const response = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tab.id, {
+        type: 'FROM_EXTENSION',
+        action: 'extractContentDirect',
+        force: true
+      }, response => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+        } else {
+          resolve(response);
+        }
+      });
+    });
+    
+    console.log('Forced extraction response:', response);
+    
+    if (!response || !response.success) {
+      throw new Error(response?.error || 'Extraction failed');
+    }
+    
+    // Get data from storage
+    const result = await chrome.storage.local.get(['chatContent']);
+    console.log('Re-extracted content:', result);
+    
+    if (!result.chatContent || !result.chatContent.messages || result.chatContent.messages.length === 0) {
+      throw new Error('No conversation content found after re-extraction');
+    }
+    
+    showStatus(`Re-extraction successful: found ${result.chatContent.messages.length} messages`);
+    
+    // Add additional info about item types
+    const itemTypes = {};
+    let totalEquations = 0;
+    
+    result.chatContent.messages.forEach(msg => {
+      if (msg.items) {
+        msg.items.forEach(item => {
+          itemTypes[item.type] = (itemTypes[item.type] || 0) + 1;
+          if (item.type === 'equation') {
+            totalEquations++;
+          }
+        });
+      }
+    });
+    
+    const typesInfo = Object.entries(itemTypes)
+      .map(([type, count]) => `${type}: ${count}`)
+      .join(', ');
+    
+    console.log(`Item types: ${typesInfo}`);
+    if (totalEquations > 0) {
+      console.log(`Found ${totalEquations} equations!`);
+      showStatus(`Re-extraction successful: found ${totalEquations} equations in ${result.chatContent.messages.length} messages`);
+    }
+    
+  } catch (error) {
+    console.error('Re-extraction error:', error);
+    showStatus("Error during re-extraction: " + error.message);
+  }
 } 

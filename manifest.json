@@ -43,7 +43,10 @@
         "jspdf.umd.min.js", 
         "jspdf.plugin.autotable.min.js", 
         "fonts/notoSansSymbols.js",
-        "injected-script.js"
+        "injected-script.js",
+        "lib/katex/*",
+        "lib/katex.min.js",
+        "lib/katex.min.css"
       ],
       "matches": [
         "https://chat.openai.com/*",
@@ -57,6 +60,6 @@
     "128": "images/icon128.png"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data: https://*;"
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data: https://*; style-src 'self' 'unsafe-inline';"
   }
 } 

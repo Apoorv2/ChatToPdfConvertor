@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>KaTeX Test</title>
+  <link rel="stylesheet" href="lib/katex.min.css">
+  <script src="lib/katex.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    .example {
+      margin: 20px 0;
+      padding: 10px;
+      border: 1px solid #eee;
+      border-radius: 5px;
+    }
+    .equation {
+      margin: 10px 0;
+      padding: 5px;
+      background-color: #f8f9fa;
+    }
+    .input {
+      font-family: monospace;
+      color: #666;
+    }
+    h3 {
+      margin-top: 30px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 5px;
+    }
+    #katex-container {
+      position: relative;
+      border: 1px dashed #ccc;
+      padding: 10px;
+      margin: 20px 0;
+    }
+    button {
+      background-color: #10a37f;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>KaTeX Rendering Test</h1>
+  <p>This page tests KaTeX rendering for the ChatGPT to PDF Converter extension.</p>
+  
+  <h3>Input and Rendered Examples</h3>
+  
+  <div class="example">
+    <div class="input">E = mc^2</div>
+    <div class="equation" id="example1"></div>
+  </div>
+  
+  <div class="example">
+    <div class="input">\frac{d}{dx}(x^2) = 2x</div>
+    <div class="equation" id="example2"></div>
+  </div>
+  
+  <div class="example">
+    <div class="input">\int_{0}^{\infty} e^{-x^2} dx = \frac{\sqrt{\pi}}{2}</div>
+    <div class="equation" id="example3"></div>
+  </div>
+  
+  <div class="example">
+    <div class="input">\begin{pmatrix} a & b \\ c & d \end{pmatrix}</div>
+    <div class="equation" id="example4"></div>
+  </div>
+  
+  <h3>Custom Input Test</h3>
+  <textarea id="custom-input" rows="3" style="width: 100%;">\sum_{i=1}^{n} i = \frac{n(n+1)}{2}</textarea>
+  <button id="render-button">Render Equation</button>
+  <div id="custom-output" class="equation"></div>
+  
+  <h3>Test Canvas Conversion</h3>
+  <div id="katex-container"></div>
+  <button id="convert-button">Convert to Image</button>
+  <div>
+    <img id="result-image" style="border: 1px solid #eee; max-width: 100%;" />
+  </div>
+  
+  <script>
+    // Render examples
+    katex.render("E = mc^2", document.getElementById("example1"), {
+      throwOnError: false,
+      displayMode: true
+    });
+    
+    katex.render("\\frac{d}{dx}(x^2) = 2x", document.getElementById("example2"), {
+      throwOnError: false,
+      displayMode: true
+    });
+    
+    katex.render("\\int_{0}^{\\infty} e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}", document.getElementById("example3"), {
+      throwOnError: false,
+      displayMode: true
+    });
+    
+    katex.render("\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}", document.getElementById("example4"), {
+      throwOnError: false,
+      displayMode: true
+    });
+    
+    // Custom input handling
+    document.getElementById("render-button").addEventListener("click", function() {
+      const input = document.getElementById("custom-input").value;
+      const output = document.getElementById("custom-output");
+      
+      try {
+        katex.render(input, output, {
+          throwOnError: false,
+          displayMode: true
+        });
+      } catch (e) {
+        output.textContent = "Error: " + e.message;
+      }
+    });
+    
+    // Test SVG/canvas conversion
+    document.getElementById("convert-button").addEventListener("click", function() {
+      const container = document.getElementById("katex-container");
+      
+      // Render equation
+      katex.render("\\int_{a}^{b} f(x) \\, dx = F(b) - F(a)", container, {
+        throwOnError: false,
+        displayMode: true
+      });
+      
+      // Create SVG representation
+      const svgData = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${container.offsetWidth}" height="${container.offsetHeight}">
+          <foreignObject width="100%" height="100%">
+            <div xmlns="http://www.w3.org/1999/xhtml">
+              ${container.innerHTML}
+            </div>
+          </foreignObject>
+        </svg>
+      `;
+      
+      // Convert SVG to data URL
+      const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+      const reader = new FileReader();
+      
+      reader.onload = function(event) {
+        const img = new Image();
+        img.onload = function() {
+          // Create canvas
+          const canvas = document.createElement('canvas');
+          canvas.width = container.offsetWidth;
+          canvas.height = container.offsetHeight;
+          
+          // Draw image to canvas
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0);
+          
+          // Get data URL and display
+          const dataURL = canvas.toDataURL('image/png');
+          document.getElementById('result-image').src = dataURL;
+        };
+        img.src = event.target.result;
+      };
+      
+      reader.readAsDataURL(svgBlob);
+    });
+    
+    // Auto-render the custom example
+    document.getElementById("render-button").click();
+    document.getElementById("convert-button").click();
+  </script>
+</body>
+</html> 

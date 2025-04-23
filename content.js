@@ -46,6 +46,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Add handling for extractContentDirect
   if (request.type === 'FROM_EXTENSION' && request.action === 'extractContentDirect') {
     debugLog('Starting content extraction...');
+    
+    // Handle force parameter to reset processing
+    if (request.force) {
+      debugLog('Force re-extraction requested, resetting processed markers');
+      document.querySelectorAll('.processed').forEach(el => {
+        el.classList.remove('processed');
+      });
+      // Reset conversation data
+      conversationData = {
+        title: '',
+        messages: []
+      };
+    }
+    
     try {
       const data = getConversationData();
       debugLog('Extraction complete:', data);
@@ -466,6 +480,98 @@ function processMessageBlock(block, index) {
     const speaker = isUser ? 'User' : 'Assistant';
     const timestamp = new Date().toLocaleTimeString();
     const items = [];
+    
+    // Add sequence tracking
+    let sequencePosition = 0;
+
+    // First, try to extract the initial text separately
+    // Find the first text node or paragraph before any special elements
+    let initialText = '';
+    
+    // Look for the main content container in modern ChatGPT UI
+    const contentContainer = block.querySelector('div[data-message-text-content="true"], div[data-message-content="true"]');
+    
+    if (contentContainer) {
+      // Check if there's direct text content before any structured elements
+      const children = Array.from(contentContainer.childNodes);
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        // Check if it's a text node or a simple paragraph without complex content
+        if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+          initialText += child.textContent.trim() + ' ';
+        } else if (
+          child.nodeType === Node.ELEMENT_NODE && 
+          child.tagName === 'P' && 
+          !child.querySelector('code, pre, span.katex, table, img')
+        ) {
+          initialText += child.textContent.trim() + ' ';
+        } else if (
+          child.nodeType === Node.ELEMENT_NODE &&
+          child.tagName !== 'CODE' &&
+          child.tagName !== 'PRE' &&
+          !child.classList.contains('katex') &&
+          !child.querySelector('code, pre, span.katex, table, img')
+        ) {
+          // Check simple div with just text
+          const hasComplexChild = Array.from(child.children).some(el => 
+            el.tagName === 'CODE' || 
+            el.tagName === 'PRE' || 
+            el.classList.contains('katex') ||
+            el.tagName === 'TABLE' ||
+            el.tagName === 'IMG'
+          );
+          
+          if (!hasComplexChild && child.textContent.trim()) {
+            initialText += child.textContent.trim() + ' ';
+          }
+        } else {
+          // Stop when we hit a complex element
+          break;
+        }
+      }
+    }
+    
+    // If we found initial text and it's valid, add it to items
+    if (initialText.trim() && isValidContent(initialText.trim())) {
+      debugLog('Found initial text:', initialText.trim());
+      items.push({ 
+        type: 'text', 
+        content: sanitizeTextForPDF(initialText.trim()),
+        sequence: sequencePosition++
+      });
+    }
+
+    // Enhanced equation detection - check entire block first for common equation patterns
+    const blockText = block.innerText;
+    const hasEquationPatterns = /F\s*=\s*m\s*a|E\s*=\s*m\s*c\^?2|p\s*=\s*m\s*v|dt\s+d[pv]|\\frac|\\partial|d\/dx|\\nabla|\\alpha|\\beta|\\\[|\\begin\{equation\}/.test(blockText);
+    
+    debugLog('Block may contain equations:', hasEquationPatterns);
+    
+    if (hasEquationPatterns) {
+      // Look for specific Physics equation lines
+      const textLines = blockText.split('\n');
+      textLines.forEach(line => {
+        const trimmedLine = line.trim();
+        if (
+          /^F\s*=\s*m\s*a$/.test(trimmedLine) ||
+          /^p\s*=\s*m\s*v$/.test(trimmedLine) ||
+          /^E\s*=\s*m\s*c\^?2$/.test(trimmedLine) ||
+          /^[•*]\s*F\s+is\s+.*force/.test(trimmedLine) ||
+          /^[•*]\s*p\s+is\s+.*momentum/.test(trimmedLine) ||
+          /^[•*]\s*=\s*p\s*=\s*m\s*v/.test(trimmedLine) ||
+          /^[•*]\s*Start\s+with\s+momentum/.test(trimmedLine) ||
+          /^[•*]\s*Differentiate\s+both\s+sides/.test(trimmedLine) ||
+          /^[•*]\s*Assuming\s+mass\s+m\s+is\s+constant/.test(trimmedLine) ||
+          /^[•*]\s*Since\s+.*=\s*dt\s+dv\s*=/.test(trimmedLine) ||
+          /^[•*]\s*Therefore/.test(trimmedLine) ||
+          /^[•*]\s*Newton/.test(trimmedLine)
+        ) {
+          debugLog('Found Physics equation line:', trimmedLine);
+          items.push({ type: 'equation', content: trimmedLine, sequence: sequencePosition++ });
+        }
+      });
+    }
+    
     const segs = block.querySelectorAll(
       'h1,h2,h3,h4,h5,h6,' +
       'p,' +
@@ -484,11 +590,22 @@ function processMessageBlock(block, index) {
         if (codeEl) {
           const content = codeEl.textContent.trim();
           const language = getCodeLanguage(el);
-          items.push({ type: 'code', content, language });
+          items.push({ type: 'code', content, language, sequence: sequencePosition++ });
           debugLog('Code block found:', language, content);
         }
         return;
       }
+      
+      // Special equation detection for KaTeX elements
+      if (el.classList.contains('katex')) {
+        const latex = el.getAttribute('data-latex');
+        if (latex) {
+          items.push({ type: 'equation', content: latex.trim(), sequence: sequencePosition++ });
+          debugLog('KaTeX equation found:', latex);
+          return;
+        }
+      }
+      
       // 2) Extract markdown/text-base paragraphs & lists, but skip if contains code
       if (el.tagName === 'DIV' && (el.className.includes('markdown') || el.className.includes('text-base'))) {
         // Instead of treating entire div as plain text, extract its structure properly
@@ -498,7 +615,7 @@ function processMessageBlock(block, index) {
         el.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
           const txt = heading.innerText.trim();
           if (txt) {
-            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
+            items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
             debugLog('Heading:', txt);
           }
         });
@@ -510,8 +627,35 @@ function processMessageBlock(block, index) {
         paragraphs.forEach(p => {
           const txt = p.innerText.trim();
           if (txt) {
-            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
-            debugLog('Paragraph:', txt);
+            // Check if this paragraph is likely an equation
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt) ||
+              /\\frac/.test(txt) ||
+              /\\int/.test(txt) ||
+              /\\sum/.test(txt) ||
+              /\\sqrt/.test(txt) ||
+              /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+              /\\partial|\\nabla/.test(txt) ||
+              /^[•*]\s*F\s+is\s+.*force/.test(txt) ||
+              /^[•*]\s*p\s+is\s+.*momentum/.test(txt) ||
+              /^[•*]\s*=\s*p\s*=\s*m\s*v/.test(txt) ||
+              /^[•*]\s*Start\s+with\s+momentum/.test(txt) ||
+              /^[•*]\s*Differentiate\s+both\s+sides/.test(txt) ||
+              /^[•*]\s*Assuming\s+mass\s+m\s+is\s+constant/.test(txt) ||
+              /^[•*]\s*Since\s+.*=\s*dt\s+dv\s*=/.test(txt) ||
+              /^[•*]\s*Therefore/.test(txt) ||
+              /^[•*]\s*Newton/.test(txt)
+            ) {
+              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              debugLog('Equation paragraph found:', txt);
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              debugLog('Paragraph:', txt);
+            }
           }
         });
         
@@ -526,8 +670,35 @@ function processMessageBlock(block, index) {
             
             const txt = li.innerText.trim();
             if (txt) {
-              items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt) });
-              debugLog('List item:', txt);
+              // Check if this list item is likely an equation
+              if (
+                /F\s*=\s*m\s*a/.test(txt) ||
+                /E\s*=\s*m\s*c\^?2/.test(txt) ||
+                /p\s*=\s*m\s*v/.test(txt) ||
+                /dt\s+d[pv]/.test(txt) ||
+                /=\s*m\s*d[v]\/dt/.test(txt) ||
+                /\\frac/.test(txt) ||
+                /\\int/.test(txt) ||
+                /\\sum/.test(txt) ||
+                /\\sqrt/.test(txt) ||
+                /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+                /\\partial|\\nabla/.test(txt) ||
+                /^F\s+is\s+.*force/.test(txt) ||
+                /^p\s+is\s+.*momentum/.test(txt) ||
+                /^=\s*p\s*=\s*m\s*v/.test(txt) ||
+                /^Start\s+with\s+momentum/.test(txt) ||
+                /^Differentiate\s+both\s+sides/.test(txt) ||
+                /^Assuming\s+mass\s+m\s+is\s+constant/.test(txt) ||
+                /^Since\s+.*=\s*dt\s+dv\s*=/.test(txt) ||
+                /^Therefore/.test(txt) ||
+                /^Newton/.test(txt)
+              ) {
+                items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+                debugLog('Equation list item found:', txt);
+              } else {
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+                debugLog('List item:', txt);
+              }
             }
           });
         });
@@ -542,8 +713,26 @@ function processMessageBlock(block, index) {
         directTextContainers.forEach(container => {
           const txt = container.innerText.trim();
           if (txt) {
-            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
-            debugLog('Direct text container:', txt);
+            // Check if this container has equation-like content
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt) ||
+              /\\frac/.test(txt) ||
+              /\\int/.test(txt) ||
+              /\\sum/.test(txt) ||
+              /\\sqrt/.test(txt) ||
+              /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+              /\\partial|\\nabla/.test(txt)
+            ) {
+              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              debugLog('Equation in direct container found:', txt);
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              debugLog('Direct text container:', txt);
+            }
           }
         });
         
@@ -556,7 +745,7 @@ function processMessageBlock(block, index) {
           pre.classList.add('processed');
           const content = code.textContent.trim();
           const language = getCodeLanguage(pre);
-          items.push({ type: 'code', content, language });
+          items.push({ type: 'code', content, language, sequence: sequencePosition++ });
           debugLog('Nested code block found:', language, content);
         });
         
@@ -567,15 +756,41 @@ function processMessageBlock(block, index) {
         if (/^H[1-6]$/.test(tag) || tag === 'P') {
           const txt = el.innerText.trim();
           if (txt) {
-            items.push({ type: 'text', content: sanitizeTextForPDF(txt) });
-            debugLog('Text:', txt);
+            // Check if heading or paragraph is equation-like
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt)
+            ) {
+              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              debugLog('Equation in heading/paragraph:', txt);
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              debugLog('Text:', txt);
+            }
           }
         } else if (tag === 'UL' || tag === 'OL') {
           Array.from(el.children).forEach(li => {
             const txt = li.innerText.trim();
             if (txt) {
-              items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt) });
-              debugLog('List item:', txt);
+              // Check if list item is equation-like
+              if (
+                /F\s*=\s*m\s*a/.test(txt) ||
+                /E\s*=\s*m\s*c\^?2/.test(txt) ||
+                /p\s*=\s*m\s*v/.test(txt) ||
+                /dt\s+d[pv]/.test(txt) ||
+                /=\s*m\s*d[v]\/dt/.test(txt) ||
+                /F\s+is\s+.*force/.test(txt) ||
+                /p\s+is\s+.*momentum/.test(txt)
+              ) {
+                items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+                debugLog('Equation in list item:', txt);
+              } else {
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+                debugLog('List item:', txt);
+              }
             }
           });
         } else if (tag === 'TABLE') {
@@ -586,18 +801,18 @@ function processMessageBlock(block, index) {
             Array.from(tr.querySelectorAll('td'))
               .map(td => sanitizeTextForPDF(td.innerText.trim()))
           );
-          items.push({ type: 'table', headers, rows });
+          items.push({ type: 'table', headers, rows, sequence: sequencePosition++ });
           debugLog('Table rows:', rows.length);
         } else if (tag === 'IMG') {
           const src = el.src;
           if (src) {
-            items.push({ type: 'image', content: src });
+            items.push({ type: 'image', content: src, sequence: sequencePosition++ });
             debugLog('Image:', src);
           }
         } else if (el.classList.contains('katex')) {
           const latex = el.getAttribute('data-latex');
           if (latex) {
-            items.push({ type: 'equation', content: latex.trim() });
+            items.push({ type: 'equation', content: latex.trim(), sequence: sequencePosition++ });
             debugLog('KaTeX equation:', latex);
           }
         }
@@ -605,7 +820,11 @@ function processMessageBlock(block, index) {
         console.warn('Segment error:', err);
       }
     });
+    
     if (items.length > 0) {
+      // Sort items by sequence to ensure correct order
+      items.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+      
       conversationData.messages.push({ speaker, timestamp, items });
       debugLog(`Added ${speaker} message with ${items.length} items`);
     }
