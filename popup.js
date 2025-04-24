@@ -270,7 +270,8 @@ function initializeApp() {
             // Convert to equation type
             message.items[index] = { 
               type: 'equation', 
-              content: content 
+              content: content,
+              y: item.y // Preserve y-coordinate
             };
           }
         }
@@ -311,6 +312,17 @@ function initializeApp() {
           processedItems.push(item);
         }
       });
+      
+      // Make sure we maintain visual ordering by sorting by y-coordinate
+      if (processedItems.some(item => item.y !== undefined)) {
+        processedItems.sort((a, b) => {
+          const yA = a.y !== undefined ? a.y : Number.MAX_SAFE_INTEGER;
+          const yB = b.y !== undefined ? b.y : Number.MAX_SAFE_INTEGER;
+          return yA - yB;
+        });
+        
+        console.log(`Sorted ${processedItems.length} items by visual position for PDF`);
+      }
       
       return { ...message, items: processedItems };
     });

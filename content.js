@@ -481,9 +481,9 @@ function processMessageBlock(block, index) {
     const timestamp = new Date().toLocaleTimeString();
     const items = [];
     
-    // Add sequence tracking
-    let sequencePosition = 0;
-
+    // Add visual position tracking
+    const blockY = block.getBoundingClientRect().top;
+    
     // First, try to extract the initial text separately
     // Find the first text node or paragraph before any special elements
     let initialText = '';
@@ -537,7 +537,7 @@ function processMessageBlock(block, index) {
       items.push({ 
         type: 'text', 
         content: sanitizeTextForPDF(initialText.trim()),
-        sequence: sequencePosition++
+        y: blockY // Store y-position
       });
     }
 
@@ -550,7 +550,7 @@ function processMessageBlock(block, index) {
     if (hasEquationPatterns) {
       // Look for specific Physics equation lines
       const textLines = blockText.split('\n');
-      textLines.forEach(line => {
+      textLines.forEach((line, lineIndex) => {
         const trimmedLine = line.trim();
         if (
           /^F\s*=\s*m\s*a$/.test(trimmedLine) ||
@@ -567,7 +567,13 @@ function processMessageBlock(block, index) {
           /^[•*]\s*Newton/.test(trimmedLine)
         ) {
           debugLog('Found Physics equation line:', trimmedLine);
-          items.push({ type: 'equation', content: trimmedLine, sequence: sequencePosition++ });
+          // Estimate y-position based on line index and block position
+          const estimatedY = blockY + (lineIndex * 20); // Approximate line height
+          items.push({ 
+            type: 'equation', 
+            content: trimmedLine, 
+            y: estimatedY
+          });
         }
       });
     }
@@ -584,13 +590,22 @@ function processMessageBlock(block, index) {
     );
     debugLog('Block segments count:', segs.length);
     segs.forEach(el => {
+      // Get visual position (y-coordinate) for this element
+      const elementRect = el.getBoundingClientRect();
+      const elementY = elementRect.top;
+      
       // 1) Extract code blocks first
       if (el.tagName === 'PRE') {
         const codeEl = el.querySelector('code');
         if (codeEl) {
           const content = codeEl.textContent.trim();
           const language = getCodeLanguage(el);
-          items.push({ type: 'code', content, language, sequence: sequencePosition++ });
+          items.push({ 
+            type: 'code', 
+            content, 
+            language, 
+            y: elementY
+          });
           debugLog('Code block found:', language, content);
         }
         return;
@@ -600,7 +615,11 @@ function processMessageBlock(block, index) {
       if (el.classList.contains('katex')) {
         const latex = el.getAttribute('data-latex');
         if (latex) {
-          items.push({ type: 'equation', content: latex.trim(), sequence: sequencePosition++ });
+          items.push({ 
+            type: 'equation', 
+            content: latex.trim(), 
+            y: elementY
+          });
           debugLog('KaTeX equation found:', latex);
           return;
         }
@@ -615,7 +634,12 @@ function processMessageBlock(block, index) {
         el.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
           const txt = heading.innerText.trim();
           if (txt) {
-            items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+            const headingY = elementY + heading.getBoundingClientRect().top - el.getBoundingClientRect().top;
+            items.push({ 
+              type: 'text', 
+              content: sanitizeTextForPDF(txt), 
+              y: headingY
+            });
             debugLog('Heading:', txt);
           }
         });
@@ -627,6 +651,7 @@ function processMessageBlock(block, index) {
         paragraphs.forEach(p => {
           const txt = p.innerText.trim();
           if (txt) {
+            const paragraphY = elementY + p.getBoundingClientRect().top - el.getBoundingClientRect().top;
             // Check if this paragraph is likely an equation
             if (
               /F\s*=\s*m\s*a/.test(txt) ||
@@ -650,10 +675,10 @@ function processMessageBlock(block, index) {
               /^[•*]\s*Therefore/.test(txt) ||
               /^[•*]\s*Newton/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              items.push({ type: 'equation', content: txt, y: paragraphY });
               debugLog('Equation paragraph found:', txt);
             } else {
-              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: paragraphY });
               debugLog('Paragraph:', txt);
             }
           }
@@ -664,12 +689,17 @@ function processMessageBlock(block, index) {
           // Skip if already inside a processed list
           if (list.closest('ol, ul') !== list) return;
           
-          Array.from(list.querySelectorAll('li')).forEach(li => {
+          const listY = elementY + list.getBoundingClientRect().top - el.getBoundingClientRect().top;
+          
+          Array.from(list.querySelectorAll('li')).forEach((li, liIndex) => {
             // Only process direct children of this list
             if (li.closest('ol, ul') !== list) return;
             
             const txt = li.innerText.trim();
             if (txt) {
+              // Calculate approximate y position for each list item
+              const listItemY = listY + (liIndex * 20); // Approximate line height
+              
               // Check if this list item is likely an equation
               if (
                 /F\s*=\s*m\s*a/.test(txt) ||
@@ -693,10 +723,10 @@ function processMessageBlock(block, index) {
                 /^Therefore/.test(txt) ||
                 /^Newton/.test(txt)
               ) {
-                items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+                items.push({ type: 'equation', content: txt, y: listItemY });
                 debugLog('Equation list item found:', txt);
               } else {
-                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: listItemY });
                 debugLog('List item:', txt);
               }
             }
@@ -713,6 +743,7 @@ function processMessageBlock(block, index) {
         directTextContainers.forEach(container => {
           const txt = container.innerText.trim();
           if (txt) {
+            const containerY = elementY + container.getBoundingClientRect().top - el.getBoundingClientRect().top;
             // Check if this container has equation-like content
             if (
               /F\s*=\s*m\s*a/.test(txt) ||
@@ -727,10 +758,10 @@ function processMessageBlock(block, index) {
               /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
               /\\partial|\\nabla/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              items.push({ type: 'equation', content: txt, y: containerY });
               debugLog('Equation in direct container found:', txt);
             } else {
-              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: containerY });
               debugLog('Direct text container:', txt);
             }
           }
@@ -745,7 +776,8 @@ function processMessageBlock(block, index) {
           pre.classList.add('processed');
           const content = code.textContent.trim();
           const language = getCodeLanguage(pre);
-          items.push({ type: 'code', content, language, sequence: sequencePosition++ });
+          const codeY = elementY + pre.getBoundingClientRect().top - el.getBoundingClientRect().top;
+          items.push({ type: 'code', content, language, y: codeY });
           debugLog('Nested code block found:', language, content);
         });
         
@@ -764,17 +796,18 @@ function processMessageBlock(block, index) {
               /dt\s+d[pv]/.test(txt) ||
               /=\s*m\s*d[v]\/dt/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+              items.push({ type: 'equation', content: txt, y: elementY });
               debugLog('Equation in heading/paragraph:', txt);
             } else {
-              items.push({ type: 'text', content: sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: elementY });
               debugLog('Text:', txt);
             }
           }
         } else if (tag === 'UL' || tag === 'OL') {
-          Array.from(el.children).forEach(li => {
+          Array.from(el.children).forEach((li, idx) => {
             const txt = li.innerText.trim();
             if (txt) {
+              const liY = elementY + (idx * 20); // approximate y position for list items
               // Check if list item is equation-like
               if (
                 /F\s*=\s*m\s*a/.test(txt) ||
@@ -785,10 +818,10 @@ function processMessageBlock(block, index) {
                 /F\s+is\s+.*force/.test(txt) ||
                 /p\s+is\s+.*momentum/.test(txt)
               ) {
-                items.push({ type: 'equation', content: txt, sequence: sequencePosition++ });
+                items.push({ type: 'equation', content: txt, y: liY });
                 debugLog('Equation in list item:', txt);
               } else {
-                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), sequence: sequencePosition++ });
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: liY });
                 debugLog('List item:', txt);
               }
             }
@@ -801,18 +834,18 @@ function processMessageBlock(block, index) {
             Array.from(tr.querySelectorAll('td'))
               .map(td => sanitizeTextForPDF(td.innerText.trim()))
           );
-          items.push({ type: 'table', headers, rows, sequence: sequencePosition++ });
+          items.push({ type: 'table', headers, rows, y: elementY });
           debugLog('Table rows:', rows.length);
         } else if (tag === 'IMG') {
           const src = el.src;
           if (src) {
-            items.push({ type: 'image', content: src, sequence: sequencePosition++ });
+            items.push({ type: 'image', content: src, y: elementY });
             debugLog('Image:', src);
           }
         } else if (el.classList.contains('katex')) {
           const latex = el.getAttribute('data-latex');
           if (latex) {
-            items.push({ type: 'equation', content: latex.trim(), sequence: sequencePosition++ });
+            items.push({ type: 'equation', content: latex.trim(), y: elementY });
             debugLog('KaTeX equation:', latex);
           }
         }
@@ -822,9 +855,10 @@ function processMessageBlock(block, index) {
     });
     
     if (items.length > 0) {
-      // Sort items by sequence to ensure correct order
-      items.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+      // Sort items by y-coordinate to ensure correct visual order
+      items.sort((a, b) => (a.y || 0) - (b.y || 0));
       
+      debugLog(`Sorted ${items.length} items by visual position`);
       conversationData.messages.push({ speaker, timestamp, items });
       debugLog(`Added ${speaker} message with ${items.length} items`);
     }
