@@ -238,6 +238,38 @@ function initializeApp() {
     
     console.log("Processing raw messages:", JSON.stringify(messages.slice(0, 2))); // Log first 2 messages
     
+    // Helper function to check if a text is a UI control label
+    function isUIControlText(text) {
+      if (!text) return false;
+      const lcText = text.toLowerCase().trim();
+      return lcText === 'java' || 
+             lcText === 'copy' || 
+             lcText === 'edit' || 
+             lcText === 'copy edit' ||
+             /^(javascript|python|typescript|html|css|json|xml|yaml|sql|c\+\+|c#|go|ruby|php)$/.test(lcText);
+    }
+    
+    // Helper function to detect if an item should be merged with previous code block
+    function shouldSkipAsUIControl(item, prevItem) {
+      // Skip standalone UI control text
+      if (item.type === 'text' && isUIControlText(item.content)) {
+        console.log('Skipping UI control text:', item.content);
+        return true;
+      }
+      
+      // Skip text that follows code blocks and contains only UI controls
+      if (item.type === 'text' && prevItem && prevItem.type === 'code' && prevItem.isCodeBlock) {
+        const words = item.content.trim().toLowerCase().split(/\s+/);
+        if (words.length <= 3 && words.every(word => 
+          ['java', 'copy', 'edit', 'javascript', 'python', 'typescript'].includes(word))) {
+          console.log('Skipping UI control after code block:', item.content);
+          return true;
+        }
+      }
+      
+      return false;
+    }
+    
     return messages.map(message => {
       if (!message.items || !Array.isArray(message.items)) return message;
       
@@ -308,7 +340,15 @@ function initializeApp() {
       const seenCode = new Set();
 
       // First pass: Identify all unique items
+      // Keep track of previous item to detect UI controls after code blocks
+      let prevItem = null;
+      
       message.items.forEach(item => {
+        // Skip UI control text elements
+        if (shouldSkipAsUIControl(item, prevItem)) {
+          return;
+        }
+        
         if (item.type === 'text') {
           const txt = item.content.trim();
           if (!txt) return;
@@ -321,6 +361,7 @@ function initializeApp() {
           if (normalizedTxt && !seenTextNormalized.has(normalizedTxt)) {
             seenTextNormalized.add(normalizedTxt);
             processedItems.push(item);
+            prevItem = item;
           } else {
             console.log('Skipping duplicate text:', txt);
           }
@@ -334,6 +375,7 @@ function initializeApp() {
           if (normalizedEq && !seenEquationNormalized.has(normalizedEq)) {
             seenEquationNormalized.add(normalizedEq);
             processedItems.push(item);
+            prevItem = item;
           } else {
             console.log('Skipping duplicate equation:', eq);
           }
@@ -343,16 +385,34 @@ function initializeApp() {
           if (!code || seenCode.has(code)) return;
           seenCode.add(code);
           processedItems.push(item);
+          prevItem = item;
         }
         else {
           // Keep other item types (images, tables)
           processedItems.push(item);
+          prevItem = item;
         }
       });
       
       // Second pass: Check for text that contains the same content as equations
-      // Remove text items that are duplicating equations
-      const finalItems = processedItems.filter(item => {
+      // Remove text items that are duplicating equations or are UI controls
+      const finalItems = processedItems.filter((item, index) => {
+        // Immediately skip UI controls
+        if (item.type === 'text' && isUIControlText(item.content)) {
+          console.log('Final filter: Removing UI control text:', item.content);
+          return false;
+        }
+        
+        // Check for UI control text after code blocks
+        if (item.type === 'text' && index > 0 && processedItems[index-1].type === 'code') {
+          const words = item.content.trim().toLowerCase().split(/\s+/);
+          if (words.length <= 3 && words.some(word => 
+            ['java', 'copy', 'edit', 'javascript', 'python', 'typescript'].includes(word))) {
+            console.log('Final filter: Removing UI control after code:', item.content);
+            return false;
+          }
+        }
+        
         if (item.type !== 'text') return true;
         
         // Check if this text item appears to be an equation that we've already included

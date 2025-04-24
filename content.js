@@ -33,6 +33,17 @@ function debugLog(...args) {
   }
 }
 
+// Add this helper function at the top level (before or after getCodeLanguage)
+function isUIControl(text) {
+  if (!text) return false;
+  const lcText = text.toLowerCase().trim();
+  return lcText === 'java' || 
+         lcText === 'copy' || 
+         lcText === 'edit' || 
+         lcText === 'copy edit' ||
+         /^(javascript|python|typescript|html|css|json|xml|yaml|sql|c\+\+|c#|go|ruby|php)$/.test(lcText);
+}
+
 // Update the message listener in content.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   debugLog('Received message:', request);
@@ -279,6 +290,8 @@ function extractMessageData(block) {
 }
 
 function getCodeLanguage(preElement) {
+  if (!preElement) return '';
+  
   const classes = preElement.className.split(' ');
   for (const cls of classes) {
     if (cls.startsWith('language-')) {
@@ -469,6 +482,13 @@ function processMessageBlock(block, index) {
   try {
     if (block.classList.contains('processed')) return;
     block.classList.add('processed');
+    
+    // Skip processing if this is a UI control element
+    if (block.classList.contains('ui-control-ignore') || isUIControl(block.textContent)) {
+      debugLog('Skipping UI control block:', block.textContent);
+      return;
+    }
+    
     let isUser = false;
     const userRoleEl = block.querySelector('[data-message-author-role="user"]');
     if (userRoleEl) isUser = true;
@@ -624,11 +644,36 @@ function processMessageBlock(block, index) {
             type: 'code', 
             content, 
             language, 
-            y: elementY
+            y: elementY,
+            isCodeBlock: true // Mark as code block for filtering related UI elements
           });
           debugLog('Code block found:', language, content);
+          
+          // Mark any nearby "Copy" or "Edit" buttons or language indicators to be ignored
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            const index = siblings.indexOf(el);
+            
+            // Mark siblings that are likely UI controls
+            for (let i = index - 1; i <= index + 3 && i < siblings.length; i++) {
+              if (i >= 0 && i !== index) {
+                const sibling = siblings[i];
+                const siblingText = sibling.textContent.trim().toLowerCase();
+                
+                if (siblingText === 'java' || 
+                    siblingText === 'copy' || 
+                    siblingText === 'edit' ||
+                    siblingText === 'copy edit' ||
+                    /^(javascript|python|typescript|html|css|json|xml)$/.test(siblingText)) {
+                  sibling.classList.add('ui-control-ignore');
+                  debugLog('Marked UI control for ignoring:', siblingText);
+                }
+              }
+            }
+          }
+          return;
         }
-        return;
       }
       
       // Special equation detection for KaTeX elements
@@ -653,6 +698,12 @@ function processMessageBlock(block, index) {
       
       // 2) Extract markdown/text-base paragraphs & lists, but skip if contains code
       if (el.tagName === 'DIV' && (el.className.includes('markdown') || el.className.includes('text-base'))) {
+        // Skip elements that are UI controls or marked to be ignored
+        if (el.classList.contains('ui-control-ignore') || isUIControl(el.textContent)) {
+          debugLog('Skipping UI control element:', el.textContent);
+          return;
+        }
+        
         // Instead of treating entire div as plain text, extract its structure properly
         debugLog('Processing structured markdown container...');
         
@@ -821,7 +872,7 @@ function processMessageBlock(block, index) {
           const content = code.textContent.trim();
           const language = getCodeLanguage(pre);
           const codeY = elementY + pre.getBoundingClientRect().top - el.getBoundingClientRect().top;
-          items.push({ type: 'code', content, language, y: codeY });
+          items.push({ type: 'code', content, language, y: codeY, isCodeBlock: true });
           debugLog('Nested code block found:', language, content);
         });
         
@@ -927,19 +978,6 @@ function processMessageBlock(block, index) {
   } catch (error) {
     debugLog(`Error processing message block ${index}:`, error);
   }
-}
-
-// Add this helper function
-function getCodeLanguage(preElement) {
-  if (!preElement) return '';
-  
-  const classes = preElement.className.split(' ');
-  for (const cls of classes) {
-    if (cls.startsWith('language-')) {
-      return cls.replace('language-', '');
-    }
-  }
-  return '';
 }
 
 // Add this to help with debugging
