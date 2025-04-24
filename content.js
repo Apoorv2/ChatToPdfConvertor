@@ -547,6 +547,22 @@ function processMessageBlock(block, index) {
     
     debugLog('Block may contain equations:', hasEquationPatterns);
     
+    // Keep track of extracted equation content to avoid duplicates
+    const extractedEquationContent = new Set();
+    
+    // Helper function to normalize equations for comparing
+    function normalizeEquation(eq) {
+      if (!eq) return '';
+      return eq.trim()
+        .replace(/\s+/g, '')
+        .replace(/[=:]+/g, '=')
+        .replace(/F=ma|F=m\*a|F=m×a/i, 'F=ma')
+        .replace(/differentiatebothsideswithrespecttotime/i, 'dp/dt=d(mv)/dt')
+        .replace(/assumingmassmisconstant/i, 'dp/dt=mdv/dt')
+        .replace(/since=dv\/dt=a/i, 'F=ma')
+        .toLowerCase();
+    }
+    
     if (hasEquationPatterns) {
       // Look for specific Physics equation lines
       const textLines = blockText.split('\n');
@@ -566,14 +582,18 @@ function processMessageBlock(block, index) {
           /^[•*]\s*Therefore/.test(trimmedLine) ||
           /^[•*]\s*Newton/.test(trimmedLine)
         ) {
-          debugLog('Found Physics equation line:', trimmedLine);
-          // Estimate y-position based on line index and block position
-          const estimatedY = blockY + (lineIndex * 20); // Approximate line height
-          items.push({ 
-            type: 'equation', 
-            content: trimmedLine, 
-            y: estimatedY
-          });
+          const normalized = normalizeEquation(trimmedLine);
+          if (!extractedEquationContent.has(normalized)) {
+            debugLog('Found Physics equation line:', trimmedLine);
+            // Estimate y-position based on line index and block position
+            const estimatedY = blockY + (lineIndex * 20); // Approximate line height
+            items.push({ 
+              type: 'equation', 
+              content: trimmedLine, 
+              y: estimatedY
+            });
+            extractedEquationContent.add(normalized);
+          }
         }
       });
     }
@@ -615,12 +635,18 @@ function processMessageBlock(block, index) {
       if (el.classList.contains('katex')) {
         const latex = el.getAttribute('data-latex');
         if (latex) {
-          items.push({ 
-            type: 'equation', 
-            content: latex.trim(), 
-            y: elementY
-          });
-          debugLog('KaTeX equation found:', latex);
+          const normalized = normalizeEquation(latex.trim());
+          if (!extractedEquationContent.has(normalized)) {
+            items.push({ 
+              type: 'equation', 
+              content: latex.trim(), 
+              y: elementY
+            });
+            extractedEquationContent.add(normalized);
+            debugLog('KaTeX equation found:', latex);
+          } else {
+            debugLog('Skipping duplicate KaTeX equation:', latex);
+          }
           return;
         }
       }
@@ -675,8 +701,14 @@ function processMessageBlock(block, index) {
               /^[•*]\s*Therefore/.test(txt) ||
               /^[•*]\s*Newton/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, y: paragraphY });
-              debugLog('Equation paragraph found:', txt);
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: paragraphY });
+                debugLog('Equation paragraph found:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
             } else {
               items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: paragraphY });
               debugLog('Paragraph:', txt);
@@ -723,8 +755,14 @@ function processMessageBlock(block, index) {
                 /^Therefore/.test(txt) ||
                 /^Newton/.test(txt)
               ) {
-                items.push({ type: 'equation', content: txt, y: listItemY });
-                debugLog('Equation list item found:', txt);
+                const normalized = normalizeEquation(txt);
+                if (!extractedEquationContent.has(normalized)) {
+                  items.push({ type: 'equation', content: txt, y: listItemY });
+                  debugLog('Equation list item found:', txt);
+                  extractedEquationContent.add(normalized);
+                } else {
+                  debugLog('Skipping duplicate equation:', txt);
+                }
               } else {
                 items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: listItemY });
                 debugLog('List item:', txt);
@@ -758,8 +796,14 @@ function processMessageBlock(block, index) {
               /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
               /\\partial|\\nabla/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, y: containerY });
-              debugLog('Equation in direct container found:', txt);
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: containerY });
+                debugLog('Equation in direct container found:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
             } else {
               items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: containerY });
               debugLog('Direct text container:', txt);
@@ -796,8 +840,14 @@ function processMessageBlock(block, index) {
               /dt\s+d[pv]/.test(txt) ||
               /=\s*m\s*d[v]\/dt/.test(txt)
             ) {
-              items.push({ type: 'equation', content: txt, y: elementY });
-              debugLog('Equation in heading/paragraph:', txt);
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: elementY });
+                debugLog('Equation in heading/paragraph:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
             } else {
               items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: elementY });
               debugLog('Text:', txt);
@@ -818,8 +868,14 @@ function processMessageBlock(block, index) {
                 /F\s+is\s+.*force/.test(txt) ||
                 /p\s+is\s+.*momentum/.test(txt)
               ) {
-                items.push({ type: 'equation', content: txt, y: liY });
-                debugLog('Equation in list item:', txt);
+                const normalized = normalizeEquation(txt);
+                if (!extractedEquationContent.has(normalized)) {
+                  items.push({ type: 'equation', content: txt, y: liY });
+                  debugLog('Equation in list item:', txt);
+                  extractedEquationContent.add(normalized);
+                } else {
+                  debugLog('Skipping duplicate equation:', txt);
+                }
               } else {
                 items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: liY });
                 debugLog('List item:', txt);
@@ -845,8 +901,14 @@ function processMessageBlock(block, index) {
         } else if (el.classList.contains('katex')) {
           const latex = el.getAttribute('data-latex');
           if (latex) {
-            items.push({ type: 'equation', content: latex.trim(), y: elementY });
-            debugLog('KaTeX equation:', latex);
+            const normalized = normalizeEquation(latex.trim());
+            if (!extractedEquationContent.has(normalized)) {
+              items.push({ type: 'equation', content: latex.trim(), y: elementY });
+              debugLog('KaTeX equation:', latex);
+              extractedEquationContent.add(normalized);
+            } else {
+              debugLog('Skipping duplicate equation:', latex);
+            }
           }
         }
       } catch (err) {

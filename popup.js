@@ -277,54 +277,108 @@ function initializeApp() {
         }
       });
       
-      // Filter and process items
-      const processedItems = [];
-      const seenText = new Set();
-      const seenEquations = new Set();
-      const seenCode = new Set();
+      // Helper function to normalize text for comparison
+      function normalizeContent(text) {
+        if (!text) return '';
+        return text.trim()
+          .replace(/\s+/g, ' ')                   // Normalize whitespace
+          .replace(/[•*]\s*/g, '')                // Remove bullet points
+          .replace(/^Newton['']s\s+/, '')         // Normalize "Newton's"
+          .replace(/:\s*$/, '')                   // Remove trailing colons
+          .toLowerCase();                         // Case insensitive comparison
+      }
       
+      // Helper function to normalize equations
+      function normalizeEquation(eq) {
+        if (!eq) return '';
+        return eq.trim()
+          .replace(/\s+/g, '')                    // Remove all whitespace
+          .replace(/[=:]+/g, '=')                 // Normalize equals signs
+          .replace(/F=ma|F=m\*a|F=m×a/i, 'F=ma')  // Normalize Newton's law
+          .replace(/differentiatebothsideswithrespecttotime/i, 'dp/dt=d(mv)/dt')
+          .replace(/assumingmassmisconstant/i, 'dp/dt=mdv/dt')
+          .replace(/since=dv\/dt=a/i, 'F=ma')
+          .toLowerCase();                         // Case insensitive comparison
+      }
+      
+      // Enhanced deduplication
+      const processedItems = [];
+      const seenTextNormalized = new Set();       // For normalized text comparison
+      const seenEquationNormalized = new Set();   // For normalized equation comparison
+      const seenCode = new Set();
+
+      // First pass: Identify all unique items
       message.items.forEach(item => {
         if (item.type === 'text') {
-          // Skip empty, duplicate, or UI labels ('You said:', 'ChatGPT said:')
           const txt = item.content.trim();
-          if (!txt || seenText.has(txt)) return;
+          if (!txt) return;
+          
+          // Skip specific UI labels
           if (/^You said:?$/i.test(txt) || /^ChatGPT said:?$/i.test(txt)) return;
-          seenText.add(txt);
-          processedItems.push(item);
+          
+          // Skip duplicate text with normalized comparison
+          const normalizedTxt = normalizeContent(txt);
+          if (normalizedTxt && !seenTextNormalized.has(normalizedTxt)) {
+            seenTextNormalized.add(normalizedTxt);
+            processedItems.push(item);
+          } else {
+            console.log('Skipping duplicate text:', txt);
+          }
         } 
         else if (item.type === 'equation') {
-          // Format and deduplicate equations
-          const eq = item.content;
-          if (!eq || seenEquations.has(eq)) return;
-          console.log("Processing equation:", eq);
-          seenEquations.add(eq);
-          processedItems.push(item);
+          const eq = item.content.trim();
+          if (!eq) return;
+          
+          // Skip duplicate equations with normalized comparison
+          const normalizedEq = normalizeEquation(eq);
+          if (normalizedEq && !seenEquationNormalized.has(normalizedEq)) {
+            seenEquationNormalized.add(normalizedEq);
+            processedItems.push(item);
+          } else {
+            console.log('Skipping duplicate equation:', eq);
+          }
         }
         else if (item.type === 'code') {
-          // Preserve code blocks exactly
           const code = item.content.trim();
           if (!code || seenCode.has(code)) return;
           seenCode.add(code);
           processedItems.push(item);
         }
         else {
-          // Keep other item types
+          // Keep other item types (images, tables)
           processedItems.push(item);
         }
       });
       
+      // Second pass: Check for text that contains the same content as equations
+      // Remove text items that are duplicating equations
+      const finalItems = processedItems.filter(item => {
+        if (item.type !== 'text') return true;
+        
+        // Check if this text item appears to be an equation that we've already included
+        const normalized = normalizeEquation(item.content);
+        if (normalized && seenEquationNormalized.has(normalized) && 
+            (/=/.test(item.content) || /differentiate both sides/i.test(item.content) || 
+             /assuming mass/i.test(item.content) || /since.*dv\/dt/i.test(item.content))) {
+          console.log('Removing text that duplicates equation:', item.content);
+          return false;
+        }
+        
+        return true;
+      });
+      
       // Make sure we maintain visual ordering by sorting by y-coordinate
-      if (processedItems.some(item => item.y !== undefined)) {
-        processedItems.sort((a, b) => {
+      if (finalItems.some(item => item.y !== undefined)) {
+        finalItems.sort((a, b) => {
           const yA = a.y !== undefined ? a.y : Number.MAX_SAFE_INTEGER;
           const yB = b.y !== undefined ? b.y : Number.MAX_SAFE_INTEGER;
           return yA - yB;
         });
         
-        console.log(`Sorted ${processedItems.length} items by visual position for PDF`);
+        console.log(`Sorted ${finalItems.length} items by visual position for PDF`);
       }
       
-      return { ...message, items: processedItems };
+      return { ...message, items: finalItems };
     });
   }
   
