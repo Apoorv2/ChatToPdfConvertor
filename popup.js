@@ -832,12 +832,22 @@ async function renderMessage(doc, message, startY, maxWidth) {
     let itemHeight = 0;
     
     if (item.type === 'text') {
-      // Estimate text height - most jsPDF versions don't support direct dimension measurement
+      // Check if this is a header/subheader (ends with ":" and not too long)
+      const isHeader = isHeaderText(item.content.trim());
+      
+      // Estimate text height - with special handling for headers
       const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
       const isBullet = item.content.trim().startsWith('•');
-      const lineSpacing = isBullet ? 3 : 5;
-      const extra = isBullet ? 2 : 3;
-      itemHeight = textLines.length * lineSpacing + extra + 5; // +5 for item spacing
+      
+      if (isHeader) {
+        // Headers get more spacing
+        itemHeight = textLines.length * 4 + 0 + 5; // Reduced to 4pt line height + 0pt extra + 5pt item spacing
+      } else {
+        // Regular text
+        const lineSpacing = isBullet ? 3 : 5;
+        const extra = isBullet ? 2 : 3;
+        itemHeight = textLines.length * lineSpacing + extra + 5; // +5 for item spacing
+      }
     } else if (item.type === 'code') {
       // For code blocks, use a light grey background and monospace font
       doc.setFont('courier');
@@ -925,77 +935,95 @@ async function renderMessage(doc, message, startY, maxWidth) {
       // Embed image
       try {
         const src = item.content;
-        console.log('Processing image in renderMessage:', src);
+        console.log('Processing image in renderMessage (second handler):', src);
         
-        // Create a new image element
-        const img = new Image();
-        img.crossOrigin = 'anonymous'; // Try to avoid CORS issues
+        // Check if this is an OpenAI image URL
+        const isOpenAIUrl = src.includes('oaiusercontent.com') || src.includes('chatgpt.com/files');
         
-        // Set onload handler
-        await new Promise((resolve, reject) => {
-          img.onload = function() {
-            try {
-              console.log('Image loaded with dimensions:', img.width, 'x', img.height);
-              
-              // Create a canvas to draw the image
-              const canvas = document.createElement('canvas');
-              canvas.width = img.width;
-              canvas.height = img.height;
-              
-              // Draw the image to canvas
-              const ctx = canvas.getContext('2d');
-              ctx.drawImage(img, 0, 0);
-              
-              // Get data URL
-              const dataURL = canvas.toDataURL('image/jpeg', 0.95);
-              
-              // Calculate dimensions to fit the page width - REDUCE SIZE
-              const maxImgWidth = maxWidth * 0.5; // Reduced from 0.8 to 0.5 (50% of page width)
-              
-              // Also enforce a maximum height for very tall images
-              const maxImgHeight = pageHeight * 0.4; // Maximum 40% of page height
-              
-              // Calculate width based on width constraint
-              const imgWidth = Math.min(img.width, maxImgWidth);
-              let imgHeight = (img.height * imgWidth) / img.width;
-              
-              // If height exceeds maximum, recalculate dimensions
-              if (imgHeight > maxImgHeight) {
-                imgHeight = maxImgHeight;
-                // Recalculate width to maintain aspect ratio
-                const recalcWidth = (img.width * imgHeight) / img.height;
-                // Use the smaller of the recalculated width or the maxImgWidth
-                const finalWidth = Math.min(recalcWidth, maxImgWidth);
-                
-                // Apply the final dimensions
-                doc.addImage(dataURL, 'JPEG', 20, currentY, finalWidth, imgHeight);
-              } else {
-                // Use the originally calculated dimensions
-                doc.addImage(dataURL, 'JPEG', 20, currentY, imgWidth, imgHeight);
-              }
-              
-              // Add 10pt padding after the image
-              currentY += imgHeight + 10;
-              resolve();
-            } catch (e) {
-              console.error('Error processing image for PDF:', e);
-              currentY += 5; // Skip ahead anyway
-              resolve();
-            }
-          };
-          
-          img.onerror = function(e) {
-            console.error('Failed to load image:', e);
-            currentY += 5; // Skip ahead anyway
-            resolve();
-          };
-          
-          // Start loading the image
-          img.src = src;
-        });
+        // For OpenAI images that might have CORS/403 issues, try to use the data directly
+        if (isOpenAIUrl) {
+          try {
+            // First try with direct conversion
+            const dataURL = await imageToDataURL(src);
+            
+            // Calculate dimensions to fit page width
+            const imgProps = doc.getImageProperties(dataURL);
+            const imgWidth = maxWidth * 0.5;
+            const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+            
+            doc.addImage(dataURL, 'JPEG', 15, currentY, imgWidth, imgHeight);
+            currentY += imgHeight + 5;
+          } catch (error) {
+            console.warn('Failed to load OpenAI image directly, adding placeholder (second handler):', error);
+            
+            // Add a placeholder for the image - ENHANCED VISIBILITY
+            doc.setFillColor(230, 240, 250); // Light blue background
+            doc.setDrawColor(100, 150, 200); // Darker blue border
+            const placeholderWidth = maxWidth * 0.8; // Wider placeholder
+            const placeholderHeight = 120; // Taller placeholder
+            
+            // Draw a more visible rounded rectangle
+            doc.setLineWidth(0.5);
+            doc.roundedRect(15, currentY, placeholderWidth, placeholderHeight, 5, 5, 'FD');
+            
+            // Draw a small icon to represent an image
+            doc.setFillColor(180, 200, 230);
+            doc.circle(15 + 20, currentY + 20, 10, 'F');
+            
+            // Add more visible text message
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(12);
+            doc.setTextColor(50, 50, 150); // Dark blue text
+            doc.text('OpenAI Image (Protected Content)', 15 + placeholderWidth/2, currentY + 30, {
+              align: 'center'
+            });
+            
+            // Add explanation
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(10);
+            doc.setTextColor(80, 80, 120);
+            doc.text('This image could not be embedded due to access restrictions.', 
+              15 + placeholderWidth/2, currentY + 50, {
+              align: 'center'
+            });
+            
+            // Show complete URL on multiple lines if needed
+            doc.setFontSize(8);
+            doc.setTextColor(100, 100, 100);
+            const urlLines = doc.splitTextToSize(src, placeholderWidth - 30);
+            doc.text(urlLines, 15 + placeholderWidth/2, currentY + 70, {
+              align: 'center'
+            });
+            
+            // Debug info
+            doc.setFontSize(7);
+            doc.setTextColor(150, 150, 150);
+            doc.text('Debug: Placeholder rendered at y=' + currentY, 15 + 10, currentY + placeholderHeight - 10);
+            
+            // Log confirmation of placeholder added
+            console.log('Placeholder added to PDF at y position (second handler):', currentY);
+            
+            // Reset styles
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(10);
+            doc.setTextColor(0, 0, 0);
+            doc.setLineWidth(0.1);
+            
+            currentY += placeholderHeight + 10; // Extra spacing after placeholder
+          }
+        } else {
+          // Standard image processing for non-OpenAI images
+          const dataURL = src.startsWith('data:') ? src : await imageToDataURL(src);
+          // Calculate dimensions to fit half width
+          const imgProps = doc.getImageProperties(dataURL);
+          const imgWidth = maxWidth * 0.5;
+          const imgHeight = (imgProps.height * imgWidth) / imgProps.width;
+          doc.addImage(dataURL, 'JPEG', 15, currentY, imgWidth, imgHeight);
+          currentY += imgHeight + 5;
+        }
       } catch (e) {
-        console.warn('Failed to add image:', e);
-        currentY += 5;
+        console.warn('Failed to add image (second handler):', e);
+        currentY += 5; // Add a bit of space even if image fails
       }
     } else if (item.type === 'equation') {
       try {
@@ -1066,13 +1094,35 @@ async function renderMessage(doc, message, startY, maxWidth) {
     
     if (item.type === 'text') {
       // Handle regular text and bullet lists with proper line breaks
-      const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
-      doc.text(textLines, 15, currentY);
-      // Tighten bullet list spacing
-      const isBullet = item.content.trim().startsWith('•');
-      const lineSpacing = isBullet ? 3 : 5;
-      const extra = isBullet ? 2 : 3;
-      currentY += textLines.length * lineSpacing + extra;
+      
+      // Check if this is a header/subheader (ends with ":" and not too long)
+      const isHeader = isHeaderText(item.content.trim());
+      
+      // Process heading-like text with bold style
+      if (isHeader) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11); // Slightly larger font for headers
+        
+        const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
+        doc.text(textLines, 15, currentY);
+        
+        // Reduce spacing after headers
+        const lineHeight = 4; // Reduced from 6 to 4
+        currentY += textLines.length * lineHeight + 0; // Removed extra +2 padding
+        
+        // Reset font for subsequent text
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+      } else {
+        // Normal text handling (unchanged)
+        const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
+        doc.text(textLines, 15, currentY);
+        // Tighten bullet list spacing
+        const isBullet = item.content.trim().startsWith('•');
+        const lineSpacing = isBullet ? 3 : 5;
+        const extra = isBullet ? 2 : 3;
+        currentY += textLines.length * lineSpacing + extra;
+      }
     } else if (item.type === 'image') {
       // Embed image
       try {
@@ -1596,4 +1646,152 @@ async function forceReExtractContent() {
     console.error('Re-extraction error:', error);
     showStatus("Error during re-extraction: " + error.message);
   }
-} 
+}
+
+// Convert image to data URL for PDF embedding
+function imageToDataURL(imgSrc) {
+  return new Promise((resolve, reject) => {
+    try {
+      console.log('Attempting to load image:', imgSrc.substring(0, 60) + '...');
+      
+      // For OpenAI URLs, add extra logging
+      if (imgSrc.includes('oaiusercontent.com') || imgSrc.includes('chatgpt.com/files')) {
+        console.log('Detected OpenAI image URL - CORS issues likely');
+      }
+      
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      // Set timeout to avoid hanging if image doesn't load
+      const timeoutId = setTimeout(() => {
+        console.warn('Image load timed out after 5 seconds:', imgSrc.substring(0, 60) + '...');
+        reject(new Error('Image load timeout'));
+      }, 5000);
+      
+      img.onload = function() {
+        clearTimeout(timeoutId);
+        try {
+          console.log('Image loaded successfully with dimensions:', img.width, 'x', img.height);
+          
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          
+          // Draw with a try-catch to catch potential security exceptions
+          try {
+            ctx.drawImage(img, 0, 0);
+            const dataURL = canvas.toDataURL('image/jpeg');
+            console.log('Image converted to data URL successfully');
+            resolve(dataURL);
+          } catch (error) {
+            console.error('Security error drawing image to canvas (CORS):', error);
+            reject(error);
+          }
+        } catch (error) {
+          console.warn('Error processing loaded image:', error);
+          reject(error);
+        }
+      };
+      
+      img.onerror = function(error) {
+        clearTimeout(timeoutId);
+        console.warn('Error loading image:', error);
+        
+        // Provide more detailed error info
+        let errorType = 'Unknown error';
+        if (imgSrc.includes('oaiusercontent.com')) {
+          errorType = 'OpenAI authentication required - 403 Forbidden likely';
+        }
+        console.warn('Image load error details:', errorType);
+        
+        reject(error);
+      };
+      
+      // Add load event listener to track progress
+      img.addEventListener('loadstart', () => console.log('Image load started'));
+      img.addEventListener('progress', () => console.log('Image loading in progress'));
+      img.addEventListener('loadend', () => console.log('Image load ended (success or failure)'));
+      
+      // Set image source last
+      img.src = imgSrc;
+      
+      // If the image is already loaded from cache, the onload handler
+      // might not be called, so double-check immediately
+      if (img.complete) {
+        console.log('Image was loaded from cache');
+        img.onload();
+      }
+    } catch (error) {
+      console.warn('Error creating image:', error);
+      reject(error);
+    }
+  });
+}
+
+// Function to detect if text is a header/subheader
+function isHeaderText(text) {
+  // Normalize text for comparison
+  const normalized = text.trim();
+  
+  // Common standalone headers in ChatGPT that might not have colons
+  const commonHeaders = [
+    'Constraints',
+    'Requirements',
+    'Solution',
+    'Approach',
+    'Algorithm',
+    'Pseudocode',
+    'Complexity Analysis',
+    'Time Complexity',
+    'Space Complexity',
+    'Example',
+    'Input',
+    'Output',
+    'Discussion',
+    'Summary',
+    'Conclusion',
+    'Implementation',
+    'Steps',
+    'Overview',
+    'Explanation',
+    'Analysis',
+    'Pros and Cons',
+    'Advantages',
+    'Disadvantages',
+    'Key Points',
+    'Notes',
+    'References',
+    'Further Reading',
+    'Resources',
+    'Mathematical Proof',
+    'Derivation',
+    'Methodology',
+    'Where',
+    'Mathematically'
+  ];
+  
+  // Check if text is a common header pattern
+  if (normalized.endsWith(':') && normalized.length < 60 && !normalized.startsWith('•') && !normalized.startsWith('-')) {
+    return true;
+  }
+  
+  // Check if it's a standalone header (without colon)
+  for (const header of commonHeaders) {
+    if (normalized === header || normalized === header + ':') {
+      return true;
+    }
+  }
+  
+  // Check for specific patterns like "1. Step One" or "Step 1:" or "Step 1."
+  if (/^(\d+\.\s+.{3,25}|Step\s+\d+[:.])$/i.test(normalized)) {
+    return true;
+  }
+  
+  // Check for "How to" style headers which are common in ChatGPT
+  if (normalized.startsWith('How to') && normalized.length < 60) {
+    return true;
+  }
+  
+  return false;
+} // Fixed end of file
