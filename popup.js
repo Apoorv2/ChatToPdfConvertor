@@ -270,6 +270,48 @@ function initializeApp() {
       return false;
     }
     
+    // Helper function to normalize text for comparison that handles bullet points better
+    function normalizeContent(text) {
+      if (!text) return '';
+      return text.trim()
+        .replace(/\s+/g, ' ')                   // Normalize whitespace
+        .replace(/[•*]\s*/g, '')                // Remove bullet points
+        .replace(/^Newton['']s\s+/, '')         // Normalize "Newton's"
+        .replace(/:\s*$/, '')                   // Remove trailing colons
+        .toLowerCase();                         // Case insensitive comparison
+    }
+    
+    // Helper function to extract bullet points from text
+    function extractBulletPoints(text) {
+      if (!text) return [];
+      // Split by bullet points at the beginning of a line
+      const bulletRegex = /(?:^|\n)[•*]\s+(.+?)(?=(?:\n[•*]|\n\n|$))/g;
+      const matches = [...text.matchAll(bulletRegex)];
+      return matches.map(m => m[1].trim());
+    }
+    
+    // Helper function to check if text contains a bullet point list that includes all items in the comparison list
+    function containsBulletedList(text, bulletedItems) {
+      if (!text || !bulletedItems || bulletedItems.length === 0) return false;
+      
+      // First check if the text has bullet point markers
+      if (!text.includes('•') && !text.includes('*')) return false;
+      
+      // Extract normalized bullet points from the text
+      const extractedPoints = extractBulletPoints(text);
+      const normalizedExtracted = extractedPoints.map(p => normalizeContent(p));
+      
+      // Check if each item in bulletedItems is contained in the text
+      for (const item of bulletedItems) {
+        const normalizedItem = normalizeContent(item);
+        if (!normalizedExtracted.some(point => point.includes(normalizedItem))) {
+          return false;
+        }
+      }
+      
+      return true;
+    }
+    
     return messages.map(message => {
       if (!message.items || !Array.isArray(message.items)) return message;
       
@@ -309,17 +351,6 @@ function initializeApp() {
         }
       });
       
-      // Helper function to normalize text for comparison
-      function normalizeContent(text) {
-        if (!text) return '';
-        return text.trim()
-          .replace(/\s+/g, ' ')                   // Normalize whitespace
-          .replace(/[•*]\s*/g, '')                // Remove bullet points
-          .replace(/^Newton['']s\s+/, '')         // Normalize "Newton's"
-          .replace(/:\s*$/, '')                   // Remove trailing colons
-          .toLowerCase();                         // Case insensitive comparison
-      }
-      
       // Helper function to normalize equations
       function normalizeEquation(eq) {
         if (!eq) return '';
@@ -338,6 +369,7 @@ function initializeApp() {
       const seenTextNormalized = new Set();       // For normalized text comparison
       const seenEquationNormalized = new Set();   // For normalized equation comparison
       const seenCode = new Set();
+      const bulletPointItems = [];                // Keep track of bulleted items
 
       // First pass: Identify all unique items
       // Keep track of previous item to detect UI controls after code blocks
@@ -355,6 +387,12 @@ function initializeApp() {
           
           // Skip specific UI labels
           if (/^You said:?$/i.test(txt) || /^ChatGPT said:?$/i.test(txt)) return;
+          
+          // Check if this is a bullet point item
+          const isBulletPoint = txt.startsWith('•') || txt.startsWith('*');
+          if (isBulletPoint) {
+            bulletPointItems.push(txt);
+          }
           
           // Skip duplicate text with normalized comparison
           const normalizedTxt = normalizeContent(txt);
@@ -394,7 +432,7 @@ function initializeApp() {
         }
       });
       
-      // Second pass: Check for text that contains the same content as equations
+      // Second pass: Check for text that contains the same content as equations or nested bullet points
       // Remove text items that are duplicating equations or are UI controls
       const finalItems = processedItems.filter((item, index) => {
         // Immediately skip UI controls
@@ -409,6 +447,26 @@ function initializeApp() {
           if (words.length <= 3 && words.some(word => 
             ['java', 'copy', 'edit', 'javascript', 'python', 'typescript'].includes(word))) {
             console.log('Final filter: Removing UI control after code:', item.content);
+            return false;
+          }
+        }
+        
+        // Special handling for text that might include nested bullet points
+        if (item.type === 'text' && bulletPointItems.length > 0) {
+          // Check if this text item contains the same content as separate bullet points
+          const bulletPoints = bulletPointItems.filter(bp => bp !== item.content);
+          if (containsBulletedList(item.content, bulletPoints)) {
+            console.log('Removing text that contains nested bullet points:', item.content);
+            return false;
+          }
+          
+          // Also check if this is a heading followed by duplicated bullet points
+          if (isHeaderText(item.content) && 
+              processedItems.some((otherItem, otherIndex) => 
+                otherIndex > index && 
+                otherItem.type === 'text' && 
+                otherItem.content.includes(item.content.replace(/:\s*$/, '')))) {
+            console.log('Removing heading that gets repeated with bullet points:', item.content);
             return false;
           }
         }
@@ -774,6 +832,7 @@ document.addEventListener('DOMContentLoaded', function() {
   testButton.addEventListener('click', testPDF);
 });
 
+// Update the rendering logic to properly handle indentation
 async function renderMessage(doc, message, startY, maxWidth) {
   console.log('Rendering message:', message.speaker);
   
@@ -836,8 +895,25 @@ async function renderMessage(doc, message, startY, maxWidth) {
       const isHeader = isHeaderText(item.content.trim());
       
       // Estimate text height - with special handling for headers
-      const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
-      const isBullet = item.content.trim().startsWith('•');
+      const textContent = item.content.trim();
+      const isBullet = textContent.startsWith('•') || textContent.startsWith('*');
+      
+      // Determine indentation level for bullet points
+      let indentLevel = 0;
+      if (isBullet) {
+        // Check for visual indentation that might indicate a nested bullet
+        const leadingSpaces = textContent.match(/^[•*]\s+(\s*)/);
+        if (leadingSpaces && leadingSpaces[1]) {
+          indentLevel = Math.min(3, Math.floor(leadingSpaces[1].length / 2));
+        }
+        
+        // Always apply at least one level of indentation for any bullet point
+        indentLevel = Math.max(1, indentLevel);
+      }
+      
+      // Calculate available width for text considering indentation
+      const availableWidth = maxWidth - 20 - (indentLevel * 8);
+      const textLines = doc.splitTextToSize(textContent, availableWidth);
       
       if (isHeader) {
         // Headers get more spacing
@@ -1000,9 +1076,6 @@ async function renderMessage(doc, message, startY, maxWidth) {
             doc.setTextColor(150, 150, 150);
             doc.text('Debug: Placeholder rendered at y=' + currentY, 15 + 10, currentY + placeholderHeight - 10);
             
-            // Log confirmation of placeholder added
-            console.log('Placeholder added to PDF at y position (second handler):', currentY);
-            
             // Reset styles
             doc.setFont('helvetica', 'normal');
             doc.setFontSize(10);
@@ -1114,11 +1187,34 @@ async function renderMessage(doc, message, startY, maxWidth) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(10);
       } else {
-        // Normal text handling (unchanged)
-        const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
-        doc.text(textLines, 15, currentY);
+        // Check for bullet points to add indentation
+        const content = item.content.trim();
+        const isBullet = content.startsWith('•') || content.startsWith('*');
+        
+        // Determine indentation level for bullet points
+        let indentLevel = 0;
+        if (isBullet) {
+          // Check for visual indentation that might indicate a nested bullet
+          const leadingSpaces = content.match(/^[•*]\s+(\s*)/);
+          if (leadingSpaces && leadingSpaces[1]) {
+            indentLevel = Math.min(3, Math.floor(leadingSpaces[1].length / 2));
+          }
+          
+          // Always apply at least one level of indentation for any bullet point
+          indentLevel = Math.max(1, indentLevel);
+        }
+        
+        // Calculate indent amount - moderate indentation for bullet points
+        const indent = isBullet ? 15 + (indentLevel * 3) : 15;
+        
+        // Add visual cue for nested bullet points - indent them more
+        const availableWidth = maxWidth - (isBullet ? 30 : 20) - (indentLevel * 8);
+        const textLines = doc.splitTextToSize(content, availableWidth);
+        
+        // Apply bullet point indentation
+        doc.text(textLines, indent, currentY);
+        
         // Tighten bullet list spacing
-        const isBullet = item.content.trim().startsWith('•');
         const lineSpacing = isBullet ? 3 : 5;
         const extra = isBullet ? 2 : 3;
         currentY += textLines.length * lineSpacing + extra;
@@ -1794,4 +1890,4 @@ function isHeaderText(text) {
   }
   
   return false;
-} // Fixed end of file
+}
