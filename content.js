@@ -469,6 +469,20 @@ function getConversationData() {
     }
   }
 
+  // Add table detection diagnostics
+  let totalTables = 0;
+  conversationData.messages.forEach(message => {
+    const tables = message.items.filter(item => item.type === 'table');
+    if (tables.length > 0) {
+      totalTables += tables.length;
+      debugLog(`Found ${tables.length} tables in message from ${message.speaker}`);
+      tables.forEach((table, idx) => {
+        debugLog(`Table ${idx+1}: ${table.headers?.length || 0} headers, ${table.rows?.length || 0} rows`);
+      });
+    }
+  });
+  debugLog(`Total tables found in conversation: ${totalTables}`);
+
   // Always return at least one message
   return {
     title:    conversationData.title,
@@ -934,15 +948,49 @@ function processMessageBlock(block, index) {
             }
           });
         } else if (tag === 'TABLE') {
-          const headers = Array.from(el.querySelectorAll('thead th'))
-            .map(th => sanitizeTextForPDF(th.innerText.trim()))
-            .filter(h => h);
-          const rows = Array.from(el.querySelectorAll('tbody tr')).map(tr =>
-            Array.from(tr.querySelectorAll('td'))
-              .map(td => sanitizeTextForPDF(td.innerText.trim()))
-          );
-          items.push({ type: 'table', headers, rows, y: elementY });
-          debugLog('Table rows:', rows.length);
+          try {
+            // More robust table extraction
+            debugLog('Found table element, extracting data...');
+            
+            // Extract headers - first look for thead/th elements
+            let headers = Array.from(el.querySelectorAll('thead th'))
+              .map(th => sanitizeTextForPDF(th.innerText.trim()))
+              .filter(h => h);
+            
+            // If no thead/th, try first row as header
+            if (headers.length === 0) {
+              const firstRow = el.querySelector('tr');
+              if (firstRow) {
+                headers = Array.from(firstRow.querySelectorAll('th, td'))
+                  .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+                  .filter(h => h);
+              }
+            }
+            
+            // Extract rows - skip first row if it was used as headers
+            const allRows = Array.from(el.querySelectorAll('tbody tr, tr')); 
+            const skipFirst = headers.length > 0 && !el.querySelector('thead') && allRows.length > 0;
+            const rowsToProcess = skipFirst ? allRows.slice(1) : allRows;
+            
+            const rows = rowsToProcess.map(tr =>
+              Array.from(tr.querySelectorAll('td'))
+                .map(td => sanitizeTextForPDF(td.innerText.trim()))
+            ).filter(row => row.length > 0 && row.some(cell => cell.trim() !== ''));
+            
+            if (headers.length > 0 || rows.length > 0) {
+              debugLog(`Table extracted: ${headers.length} headers, ${rows.length} rows`);
+              items.push({ 
+                type: 'table', 
+                headers, 
+                rows, 
+                y: elementY
+              });
+            } else {
+              debugLog('Empty table found - skipping');
+            }
+          } catch (tableError) {
+            console.warn('Error extracting table:', tableError);
+          }
         } else if (tag === 'IMG') {
           const src = el.src;
           if (src) {
@@ -967,6 +1015,101 @@ function processMessageBlock(block, index) {
       }
     });
     
+    // Look for div-based tables (ChatGPT often renders tables using divs)
+    const divTables = block.querySelectorAll('div[class*="table"], div[style*="grid"], div[style*="table"]');
+    divTables.forEach(tableDiv => {
+      try {
+        debugLog('Found potential div-based table structure');
+        
+        // For div-based tables, we need to determine the table structure
+        // Look for consistent patterns of child divs arranged in rows/columns
+        const rows = Array.from(tableDiv.children).filter(el => 
+          el.tagName === 'DIV' && 
+          (el.style.display === 'flex' || el.className.includes('row'))
+        );
+        
+        if (rows.length === 0) {
+          // Try different structure - look for direct children as rows
+          const childDivs = Array.from(tableDiv.children).filter(el => el.tagName === 'DIV');
+          if (childDivs.length >= 2 && // Need at least a header row and data row
+              childDivs[0].children.length > 1) { // Need at least 2 columns
+            debugLog('Found alternative div table structure');
+            
+            // Try to extract headers from first row
+            const headers = Array.from(childDivs[0].children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+              .filter(h => h);
+            
+            // Extract the rest as data rows
+            const dataRows = childDivs.slice(1).map(row => 
+              Array.from(row.children)
+                .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+            ).filter(row => row.length > 0);
+            
+            if (headers.length > 0 && dataRows.length > 0) {
+              debugLog(`Extracted div-table: ${headers.length} headers, ${dataRows.length} rows`);
+              items.push({
+                type: 'table',
+                headers,
+                rows: dataRows,
+                y: tableDiv.getBoundingClientRect().top
+              });
+            }
+          }
+          return;
+        }
+        
+        // Try to determine if first row is header
+        const firstRow = rows[0];
+        const otherRows = rows.slice(1);
+        
+        // Check if first row has different styling (often indicates header)
+        const isHeader = firstRow.classList.contains('header') || 
+                         firstRow.style.fontWeight === 'bold' ||
+                         firstRow.querySelector('strong, b') ||
+                         firstRow.style.backgroundColor !== (otherRows[0]?.style.backgroundColor);
+        
+        let headers = [];
+        let dataRows = [];
+        
+        if (isHeader) {
+          // Extract headers from first row
+          headers = Array.from(firstRow.children)
+            .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+            .filter(h => h);
+            
+          // Extract data from other rows
+          dataRows = otherRows.map(row => 
+            Array.from(row.children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+          ).filter(row => row.length > 0);
+        } else {
+          // No clear header, use all rows as data
+          dataRows = rows.map(row => 
+            Array.from(row.children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+          ).filter(row => row.length > 0);
+          
+          // If we have data, use first row values as headers too
+          if (dataRows.length > 0) {
+            headers = [...dataRows[0]];
+          }
+        }
+        
+        if (headers.length > 0 && dataRows.length > 0) {
+          debugLog(`Extracted div table: ${headers.length} headers, ${dataRows.length} rows`);
+          items.push({
+            type: 'table',
+            headers,
+            rows: dataRows,
+            y: tableDiv.getBoundingClientRect().top
+          });
+        }
+      } catch (divTableError) {
+        console.warn('Error processing div-based table:', divTableError);
+      }
+    });
+    
     if (items.length > 0) {
       // Sort items by y-coordinate to ensure correct visual order
       items.sort((a, b) => (a.y || 0) - (b.y || 0));
@@ -978,6 +1121,71 @@ function processMessageBlock(block, index) {
   } catch (error) {
     debugLog(`Error processing message block ${index}:`, error);
   }
+
+  // Make sure items is defined before trying to use it
+  if (typeof items === 'undefined') {
+    debugLog(`No items array defined in message block ${index} - skipping markdown table processing`);
+    return;
+  }
+
+  // Extra check for potential markdown tables in text items
+  const markdownTablePattern = /\|\s*[^|]+\s*\|\s*[^|]+\s*\|/;
+  const markdownTableHeaderPattern = /\|\s*[-:]+\s*\|\s*[-:]+\s*\|/;
+
+  const potentialMarkdownTables = items.filter(item => 
+    item.type === 'text' && 
+    markdownTablePattern.test(item.content) &&
+    item.content.includes('\n') &&
+    item.content.split('\n').length >= 3
+  );
+
+  potentialMarkdownTables.forEach(item => {
+    try {
+      debugLog('Found potential markdown table in text:', item.content);
+      
+      // Split into lines and process
+      const lines = item.content.split('\n')
+        .map(line => line.trim())
+        .filter(line => line && markdownTablePattern.test(line));
+      
+      // Need at least header row, separator row, and one data row
+      if (lines.length >= 3) {
+        // Extract headers from first row
+        const headerLine = lines[0];
+        const headers = headerLine.split('|')
+          .map(cell => cell.trim())
+          .filter(cell => cell);
+        
+        // Skip separator row (second line)
+        
+        // Extract data rows (third line onwards)
+        const rows = lines.slice(2).map(line => 
+          line.split('|')
+            .map(cell => cell.trim())
+            .filter(cell => cell)
+        );
+        
+        // Only process if we have valid headers and rows
+        if (headers.length > 0 && rows.length > 0) {
+          debugLog(`Extracted markdown table: ${headers.length} headers, ${rows.length} rows`);
+          
+          // Remove the text item and replace with table
+          const index = items.indexOf(item);
+          if (index !== -1) {
+            items.splice(index, 1, {
+              type: 'table',
+              headers,
+              rows,
+              y: item.y || 0
+            });
+            debugLog('Converted text to table item');
+          }
+        }
+      }
+    } catch (mdTableError) {
+      console.warn('Error processing markdown table:', mdTableError);
+    }
+  });
 }
 
 // Add this to help with debugging

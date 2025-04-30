@@ -34,6 +34,20 @@ function initializeApp() {
   
   console.log('jsPDF library loaded successfully');
   
+  // Check if autoTable plugin is available
+  const testDoc = new jsPDF();
+  if (typeof testDoc.autoTable !== 'function') {
+    console.warn('jsPDF autoTable plugin not found! Tables will use fallback rendering.');
+    document.getElementById('status').textContent = 'Warning: Table plugin not loaded';
+    document.getElementById('status').style.display = 'block';
+    setTimeout(() => {
+      document.getElementById('status').textContent = '';
+      document.getElementById('status').style.display = 'none';
+    }, 3000);
+  } else {
+    console.log('jsPDF autoTable plugin loaded successfully');
+  }
+  
   // Get UI elements
   const generateButton = document.getElementById('generatePdf');
   const exportCounter = document.getElementById('exportCounter');
@@ -148,15 +162,100 @@ function initializeApp() {
       console.log("===== PDF GENERATION START =====");
       console.log('Raw data received:', data);
       
+      // Log detailed message content for debugging
+      if (data && Array.isArray(data.messages)) {
+        console.log('===== DETAILED MESSAGE CONTENT =====');
+        data.messages.forEach((msg, idx) => {
+          console.log(`Message #${idx+1} from ${msg.speaker}:`);
+          if (msg.items && Array.isArray(msg.items)) {
+            msg.items.forEach((item, itemIdx) => {
+              if (item.type === 'text') {
+                console.log(`  Text item #${itemIdx+1}: "${item.content.substring(0, 100)}${item.content.length > 100 ? '...' : ''}"`);
+              } else {
+                console.log(`  ${item.type} item #${itemIdx+1}`);
+              }
+            });
+          }
+        });
+        console.log('===== END DETAILED MESSAGE CONTENT =====');
+      }
+      
       if (!data || !Array.isArray(data.messages)) {
         console.error('===== PDF GENERATION ERROR =====');
         showStatus("Error: Invalid conversation data");
         return;
       }
       
+      // Make sure each message has an items array
+      const rawMessages = data.messages.map(msg => {
+        if (!msg.items || !Array.isArray(msg.items)) {
+          // Add empty items array if missing
+          msg.items = [];
+        }
+        return msg;
+      });
+      
       // Pre-process messages: dedupe and format
-      const messages = processMessagesForPDF(data.messages);
-      console.log(`Preparing to render ${messages.length} messages`);
+      const processedMessages = processMessagesForPDF(rawMessages);
+      console.log(`Preparing to render ${processedMessages.length} messages`);
+      
+      // Clean any "You said:" or "ChatGPT said:" from message content
+      processedMessages.forEach(message => {
+        if (message.items && Array.isArray(message.items)) {
+          message.items.forEach(item => {
+            if (item.type === 'text' && item.content) {
+              // Store original content for comparison
+              const originalContent = item.content;
+              
+              // First clean up prefixes at the beginning of messages
+              item.content = item.content.replace(/^(You said:|ChatGPT said:|User said:|Assistant said:)\s*/i, '');
+              item.content = item.content.replace(/^(You|User):\s*/i, '');
+              item.content = item.content.replace(/^(ChatGPT|Assistant):\s*/i, '');
+              
+              // Then clean up inline references
+              item.content = item.content.replace(/\b(You said:|ChatGPT said:|User said:|Assistant said:)\s*/gi, '');
+              
+              // And handle more variations that might appear in the content
+              item.content = item.content.replace(/\b(According to you:|As you mentioned:|You mentioned:|You asked:)\s*/gi, '');
+              item.content = item.content.replace(/\b(As I mentioned:|I mentioned:|I said:|As previously mentioned:)\s*/gi, '');
+              
+              // Remove the "4o" pattern that appears at the end of messages
+              item.content = item.content.replace(/\s*4o\s*$/i, '');
+              item.content = item.content.replace(/\s*4o\s*$/, '');
+              
+              // Also try to catch any similar patterns (numbers followed by 'o' at the end)
+              item.content = item.content.replace(/\s*\d+o\s*$/i, '');
+              
+              // Log if any changes were made
+              if (originalContent !== item.content) {
+                console.log('Cleaned up message content:', 
+                  `Before: "${originalContent.substring(0, 50)}${originalContent.length > 50 ? '...' : ''}"`,
+                  `After: "${item.content.substring(0, 50)}${item.content.length > 50 ? '...' : ''}"`
+                );
+              }
+            }
+          });
+        }
+      });
+      
+      // Check if tables survived processing
+      let tablesSurvived = 0;
+      processedMessages.forEach((message, idx) => {
+        const tablesInMessage = message.items.filter(item => item.type === 'table');
+        if (tablesInMessage.length > 0) {
+          tablesSurvived += tablesInMessage.length;
+          console.log(`Tables in message ${idx} (${message.speaker}): ${tablesInMessage.length}`);
+          tablesInMessage.forEach((table, tableIdx) => {
+            console.log(`PRE-RENDER TABLE #${tableIdx+1} in message ${idx}:`, {
+              headers: table.headers || [],
+              rows: table.rows || [],
+              headerCount: table.headers ? table.headers.length : 0,
+              rowCount: table.rows ? table.rows.length : 0
+            });
+          });
+        }
+      });
+      console.log(`Tables ready for rendering: ${tablesSurvived}`);
       
       // Initialize PDF document
       console.log('Initializing PDF document...');
@@ -173,41 +272,59 @@ function initializeApp() {
       const title = data.title || 'ChatGPT Conversation';
       console.log(`Setting up PDF title: "${title}"`);
       
-      // Draw title and date
-      doc.setFontSize(16);
-      doc.setFont('helvetica', 'bold');
-      doc.text(title, margin, margin);
+      // Draw centered title with styling
+      doc.setFillColor(240, 240, 240);
+      doc.rect(0, 0, pageWidth, 32, 'F');
       
-      // Add date
-      const date = new Date().toLocaleDateString();
+      doc.setFontSize(18);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(50, 50, 50);
+      
+      // Center the title
+      const titleWidth = doc.getTextWidth(title);
+      doc.text(title, (pageWidth - titleWidth) / 2, 20);
+      
+      // Add timestamp and export info
+      const timestamp = new Date().toLocaleString();
       doc.setFontSize(10);
       doc.setFont('helvetica', 'italic');
-      doc.text(date, margin, margin + 8);
+      doc.setTextColor(100, 100, 100);
       
-      // Start position for messages
-      let yPosition = margin + 20;
+      const timestampText = `Exported on ${timestamp}`;
+      const timestampWidth = doc.getTextWidth(timestampText);
+      doc.text(timestampText, (pageWidth - timestampWidth) / 2, 30);
+      
+      // Add separator line
+      doc.setDrawColor(220, 220, 220);
+      doc.setLineWidth(0.5);
+      doc.line(margin, 36, pageWidth - margin, 36);
+      
+      // Start position for messages after header
+      let yPosition = 45;
       
       // Render each message
-      console.log(`Rendering ${messages.length} messages`);
+      console.log(`Rendering ${processedMessages.length} messages`);
       
-      for (let i = 0; i < messages.length; i++) {
-        console.log(`-- Rendering message #${i+1}: speaker=${messages[i].speaker}, items=${messages[i].items.length}`);
+      for (let i = 0; i < processedMessages.length; i++) {
+        console.log(`-- Rendering message #${i+1}: speaker=${processedMessages[i].speaker}, items=${processedMessages[i].items.length}`);
         // Break page if we exceed bottom margin
         if (yPosition > pageHeight - bottomMargin) {
+          console.log(`-- Page break: yPosition (${yPosition}) > pageHeight - bottomMargin (${pageHeight} - ${bottomMargin})`);
           doc.addPage();
           yPosition = margin;
         }
         
         // Render the message
-        yPosition = await renderMessage(doc, messages[i], yPosition, pageWidth - 2 * margin);
+        yPosition = await renderMessage(doc, processedMessages[i], yPosition, pageWidth - 2 * margin);
         
-        console.log(`Rendered message ${i+1}/${messages.length}, new Y: ${yPosition}`);
+        console.log(`Rendered message ${i+1}/${processedMessages.length}, new Y: ${yPosition}`);
       }
       
-      // Generate the final PDF
-      console.log('Generating final PDF file...');
+      // Save PDF and show download link
+      console.log("===== PDF GENERATION COMPLETE =====");
+      let pdfBytes = await doc.save();
       
-      const pdfBlob = doc.output('blob');
+      const pdfBlob = new Blob([pdfBytes], { type: 'application/pdf' });
       const pdfUrl = URL.createObjectURL(pdfBlob);
       
       console.log('PDF generated, initiating download...');
@@ -236,7 +353,50 @@ function initializeApp() {
   function processMessagesForPDF(messages) {
     if (!messages || !Array.isArray(messages)) return messages;
     
-    console.log("Processing raw messages:", JSON.stringify(messages.slice(0, 2))); // Log first 2 messages
+    console.log('Input message count before processing:', messages.length);
+    
+    // Count table items for debugging
+    let tableCount = 0;
+    messages.forEach((message, msgIndex) => {
+      if (message && message.items && Array.isArray(message.items)) {
+        const tablesToLog = message.items.filter(item => item && item.type === 'table');
+        tablesToLog.forEach((item, idx) => {
+          tableCount++;
+          console.log(`INITIAL TABLE #${tableCount} in message ${msgIndex} (${message.speaker}):`, {
+            headers: item.headers || [],
+            rows: item.rows || [],
+            headerCount: item.headers ? item.headers.length : 0,
+            rowCount: item.rows ? item.rows.length : 0
+          });
+        });
+      }
+    });
+    console.log(`Total tables found: ${tableCount}`);
+    
+    // Step 1: Filter out empty messages
+    const nonEmptyMessages = messages.filter(message => 
+      message && message.items && Array.isArray(message.items) && message.items.length > 0
+    );
+    console.log('Non-empty message count:', nonEmptyMessages.length);
+    
+    // Track tables in non-empty messages
+    let tablesInNonEmptyMessages = 0;
+    nonEmptyMessages.forEach((message, msgIndex) => {
+      const tables = message.items.filter(item => item.type === 'table');
+      if (tables.length > 0) {
+        tablesInNonEmptyMessages += tables.length;
+        console.log(`Tables in non-empty message ${msgIndex} (${message.speaker}): ${tables.length}`);
+        tables.forEach((table, idx) => {
+          console.log(`NON-EMPTY TABLE #${idx+1} in message ${msgIndex}:`, {
+            headers: table.headers || [],
+            rows: table.rows || [],
+            headerCount: table.headers ? table.headers.length : 0,
+            rowCount: table.rows ? table.rows.length : 0
+          });
+        });
+      }
+    });
+    console.log(`Tables after empty message filtering: ${tablesInNonEmptyMessages}`);
     
     // Helper function to check if a text is a UI control label
     function isUIControlText(text) {
@@ -258,11 +418,11 @@ function initializeApp() {
       }
       
       // Skip text that follows code blocks and contains only UI controls
-      if (item.type === 'text' && prevItem && prevItem.type === 'code' && prevItem.isCodeBlock) {
+      if (item.type === 'text' && prevItem && prevItem.type === 'code') {
         const words = item.content.trim().toLowerCase().split(/\s+/);
         if (words.length <= 3 && words.every(word => 
           ['java', 'copy', 'edit', 'javascript', 'python', 'typescript'].includes(word))) {
-          console.log('Skipping UI control after code block:', item.content);
+          console.log('Skipping UI control after code:', item.content);
           return true;
         }
       }
@@ -270,49 +430,8 @@ function initializeApp() {
       return false;
     }
     
-    // Helper function to normalize text for comparison that handles bullet points better
-    function normalizeContent(text) {
-      if (!text) return '';
-      return text.trim()
-        .replace(/\s+/g, ' ')                   // Normalize whitespace
-        .replace(/[•*]\s*/g, '')                // Remove bullet points
-        .replace(/^Newton['']s\s+/, '')         // Normalize "Newton's"
-        .replace(/:\s*$/, '')                   // Remove trailing colons
-        .toLowerCase();                         // Case insensitive comparison
-    }
-    
-    // Helper function to extract bullet points from text
-    function extractBulletPoints(text) {
-      if (!text) return [];
-      // Split by bullet points at the beginning of a line
-      const bulletRegex = /(?:^|\n)[•*]\s+(.+?)(?=(?:\n[•*]|\n\n|$))/g;
-      const matches = [...text.matchAll(bulletRegex)];
-      return matches.map(m => m[1].trim());
-    }
-    
-    // Helper function to check if text contains a bullet point list that includes all items in the comparison list
-    function containsBulletedList(text, bulletedItems) {
-      if (!text || !bulletedItems || bulletedItems.length === 0) return false;
-      
-      // First check if the text has bullet point markers
-      if (!text.includes('•') && !text.includes('*')) return false;
-      
-      // Extract normalized bullet points from the text
-      const extractedPoints = extractBulletPoints(text);
-      const normalizedExtracted = extractedPoints.map(p => normalizeContent(p));
-      
-      // Check if each item in bulletedItems is contained in the text
-      for (const item of bulletedItems) {
-        const normalizedItem = normalizeContent(item);
-        if (!normalizedExtracted.some(point => point.includes(normalizedItem))) {
-          return false;
-        }
-      }
-      
-      return true;
-    }
-    
-    return messages.map(message => {
+    // Step 2: Process each message individually to clean items
+    return nonEmptyMessages.map(message => {
       if (!message.items || !Array.isArray(message.items)) return message;
       
       // Log item types count for debugging
@@ -351,90 +470,207 @@ function initializeApp() {
         }
       });
       
-      // Helper function to normalize equations
-      function normalizeEquation(eq) {
-        if (!eq) return '';
-        return eq.trim()
-          .replace(/\s+/g, '')                    // Remove all whitespace
-          .replace(/[=:]+/g, '=')                 // Normalize equals signs
-          .replace(/F=ma|F=m\*a|F=m×a/i, 'F=ma')  // Normalize Newton's law
-          .replace(/differentiatebothsideswithrespecttotime/i, 'dp/dt=d(mv)/dt')
-          .replace(/assumingmassmisconstant/i, 'dp/dt=mdv/dt')
-          .replace(/since=dv\/dt=a/i, 'F=ma')
-          .toLowerCase();                         // Case insensitive comparison
+      // Helper function to normalize text for comparison
+    function normalizeContent(text) {
+      if (!text) return '';
+      return text.trim()
+        .replace(/\s+/g, ' ')                   // Normalize whitespace
+        .replace(/[•*]\s*/g, '')                // Remove bullet points
+          .replace(/^\d+\.\s+/, '')               // Remove numbered list markers
+        .replace(/^Newton['']s\s+/, '')         // Normalize "Newton's"
+        .replace(/:\s*$/, '')                   // Remove trailing colons
+        .toLowerCase();                         // Case insensitive comparison
+    }
+    
+    // Helper function to extract bullet points from text
+    function extractBulletPoints(text) {
+      if (!text) return [];
+      // Split by bullet points at the beginning of a line
+      const bulletRegex = /(?:^|\n)[•*]\s+(.+?)(?=(?:\n[•*]|\n\n|$))/g;
+      const matches = [...text.matchAll(bulletRegex)];
+      return matches.map(m => m[1].trim());
+    }
+      
+      // Helper function to extract numbered list items
+      function extractNumberedItems(text) {
+        if (!text) return [];
+        // Match numbered list items (1. Item, 2. Item, etc.)
+        const numberedRegex = /(?:^|\n)\d+\.\s+(.+?)(?=(?:\n\d+\.|\n\n|$))/g;
+        const matches = [...text.matchAll(numberedRegex)];
+        return matches.map(m => m[1].trim());
+      }
+    
+    // Helper function to check if text contains a bullet point list that includes all items in the comparison list
+    function containsBulletedList(text, bulletedItems) {
+      if (!text || !bulletedItems || bulletedItems.length === 0) return false;
+      
+      // First check if the text has bullet point markers
+      if (!text.includes('•') && !text.includes('*')) return false;
+      
+      // Extract normalized bullet points from the text
+      const extractedPoints = extractBulletPoints(text);
+      const normalizedExtracted = extractedPoints.map(p => normalizeContent(p));
+      
+      // Check if each item in bulletedItems is contained in the text
+      for (const item of bulletedItems) {
+        const normalizedItem = normalizeContent(item);
+        if (!normalizedExtracted.some(point => point.includes(normalizedItem))) {
+          return false;
+        }
+      }
+      
+      return true;
+    }
+    
+      // Helper function to check if text contains a numbered list
+      function containsNumberedList(text, numberedItems) {
+        if (!text || !numberedItems || numberedItems.length === 0) return false;
+        
+        // First check if the text has numbered list markers
+        if (!/\d+\./.test(text)) return false;
+        
+        // Extract normalized numbered items from the text
+        const extractedItems = extractNumberedItems(text);
+        const normalizedExtracted = extractedItems.map(p => normalizeContent(p));
+        
+        // Check if each item in numberedItems is contained in the text
+        for (const item of numberedItems) {
+          const normalizedItem = normalizeContent(item);
+          if (!normalizedExtracted.some(point => point.includes(normalizedItem))) {
+            return false;
+          }
+        }
+        
+        return true;
       }
       
       // Enhanced deduplication
       const processedItems = [];
       const seenTextNormalized = new Set();       // For normalized text comparison
       const seenEquationNormalized = new Set();   // For normalized equation comparison
-      const seenCode = new Set();
-      const bulletPointItems = [];                // Keep track of bulleted items
+      const seenCode = new Set();                 // For code blocks
+      const bulletPointItems = [];                // For bullet list de-duplication
+      const numberedListItems = [];               // For numbered list de-duplication
 
       // First pass: Identify all unique items
       // Keep track of previous item to detect UI controls after code blocks
       let prevItem = null;
       
       message.items.forEach(item => {
-        // Skip UI control text elements
-        if (shouldSkipAsUIControl(item, prevItem)) {
+        // Skip if we don't have content
+        if (!item.content && item.type !== 'table') return;
+        
+        // Handle different item types for deduplication
+        if (item.type === 'text') {
+          const content = item.content.trim();
+          
+          // Skip any text that's just a UI control
+          if (isUIControlText(content)) {
+            console.log('Skipping UI control text:', content);
           return;
         }
         
-        if (item.type === 'text') {
-          const txt = item.content.trim();
-          if (!txt) return;
-          
-          // Skip specific UI labels
-          if (/^You said:?$/i.test(txt) || /^ChatGPT said:?$/i.test(txt)) return;
-          
-          // Check if this is a bullet point item
-          const isBulletPoint = txt.startsWith('•') || txt.startsWith('*');
-          if (isBulletPoint) {
-            bulletPointItems.push(txt);
+          // Skip text that comes right after a code block and looks like a language name or command
+          if (prevItem && prevItem.type === 'code' && shouldSkipAsUIControl(item, prevItem)) {
+            console.log('Skipping language/command after code:', content);
+            return;
           }
           
-          // Skip duplicate text with normalized comparison
-          const normalizedTxt = normalizeContent(txt);
-          if (normalizedTxt && !seenTextNormalized.has(normalizedTxt)) {
-            seenTextNormalized.add(normalizedTxt);
+          // Normalize content for comparison
+          const normalizedContent = normalizeContent(content);
+          
+          // Skip obvious duplicates (exact matches after normalization)
+          if (seenTextNormalized.has(normalizedContent)) {
+            console.log('Skipping duplicate text:', content);
+            return;
+          }
+          
+          // Store for duplicate detection
+          seenTextNormalized.add(normalizedContent);
+          
+          // Check and store bullet point items for later analysis
+          if (content.startsWith('•') || content.startsWith('*')) {
+            bulletPointItems.push(content);
+          }
+          
+          // Check and store numbered list items
+          if (/^\d+\.\s/.test(content)) {
+            numberedListItems.push(content);
+          }
+          
+          // Add to processed items
             processedItems.push(item);
-            prevItem = item;
-          } else {
-            console.log('Skipping duplicate text:', txt);
-          }
-        } 
-        else if (item.type === 'equation') {
-          const eq = item.content.trim();
-          if (!eq) return;
+        } else if (item.type === 'equation') {
+          // Normalize equation content to catch dupes
+          const normalizedEq = normalizeEquation(item.content);
           
-          // Skip duplicate equations with normalized comparison
-          const normalizedEq = normalizeEquation(eq);
-          if (normalizedEq && !seenEquationNormalized.has(normalizedEq)) {
-            seenEquationNormalized.add(normalizedEq);
-            processedItems.push(item);
-            prevItem = item;
-          } else {
-            console.log('Skipping duplicate equation:', eq);
+          // Skip if we've seen this exact equation before
+          if (seenEquationNormalized.has(normalizedEq)) {
+            console.log('Skipping duplicate equation:', item.content);
+            return;
           }
-        }
-        else if (item.type === 'code') {
-          const code = item.content.trim();
-          if (!code || seenCode.has(code)) return;
-          seenCode.add(code);
+          
+          // Store normalized equation and add to processed
+          seenEquationNormalized.add(normalizedEq);
           processedItems.push(item);
-          prevItem = item;
-        }
-        else {
-          // Keep other item types (images, tables)
+        } else if (item.type === 'code') {
+          // For code blocks, use a simpler hashing approach
+          const codeHash = item.content.trim().toLowerCase().substring(0, 50);
+          
+          // Skip duplicate code blocks
+          if (seenCode.has(codeHash)) {
+            console.log('Skipping duplicate code block');
+            return;
+          }
+          
+          // Store hash and add to processed
+          seenCode.add(codeHash);
           processedItems.push(item);
-          prevItem = item;
+        } else if (item.type === 'table') {
+          // For tables, print detailed information
+          console.log('Processing table in message deduplication:', {
+            headers: item.headers || [],
+            rows: item.rows || [],
+            headerCount: item.headers ? item.headers.length : 0,
+            rowCount: item.rows ? item.rows.length : 0
+          });
+          
+          // Always preserve tables
+          processedItems.push(item);
+        } else {
+          // For other types (images), just add directly
+          processedItems.push(item);
         }
+        
+        // Remember the current item for the next iteration
+        prevItem = item;
       });
+      
+      console.log(`After first pass filtering: ${processedItems.length} items`);
+      
+      // Count tables after first pass
+      const tablesAfterFirstPass = processedItems.filter(item => item.type === 'table');
+      if (tablesAfterFirstPass.length > 0) {
+        console.log(`Tables after first pass filtering: ${tablesAfterFirstPass.length}`);
+        tablesAfterFirstPass.forEach((table, idx) => {
+          console.log(`FIRST-PASS TABLE #${idx+1}:`, {
+            headers: table.headers || [],
+            rows: table.rows || [],
+            headerCount: table.headers ? table.headers.length : 0,
+            rowCount: table.rows ? table.rows.length : 0
+          });
+        });
+      }
       
       // Second pass: Check for text that contains the same content as equations or nested bullet points
       // Remove text items that are duplicating equations or are UI controls
       const finalItems = processedItems.filter((item, index) => {
+        // Tables should always be preserved
+        if (item.type === 'table') {
+          console.log('Preserving table in second pass filtering');
+          return true;
+        }
+        
         // Immediately skip UI controls
         if (item.type === 'text' && isUIControlText(item.content)) {
           console.log('Final filter: Removing UI control text:', item.content);
@@ -471,33 +707,68 @@ function initializeApp() {
           }
         }
         
-        if (item.type !== 'text') return true;
-        
-        // Check if this text item appears to be an equation that we've already included
-        const normalized = normalizeEquation(item.content);
-        if (normalized && seenEquationNormalized.has(normalized) && 
-            (/=/.test(item.content) || /differentiate both sides/i.test(item.content) || 
-             /assuming mass/i.test(item.content) || /since.*dv\/dt/i.test(item.content))) {
-          console.log('Removing text that duplicates equation:', item.content);
+        // Similar handling for numbered lists
+        if (item.type === 'text' && numberedListItems.length > 0) {
+          // Check if this text item contains the same content as separate numbered items
+          const numberedItems = numberedListItems.filter(ni => ni !== item.content);
+          if (containsNumberedList(item.content, numberedItems)) {
+            console.log('Removing text that contains numbered list items:', item.content);
+            return false;
+          }
+          
+          // Check for headers repeated in numbered lists
+          if (isHeaderText(item.content) && 
+              processedItems.some((otherItem, otherIndex) => 
+                otherIndex > index && 
+                otherItem.type === 'text' && 
+                /^\d+\.\s/.test(otherItem.content) &&
+                otherItem.content.includes(item.content.replace(/:\s*$/, '')))) {
+            console.log('Removing heading that gets repeated in numbered list:', item.content);
           return false;
+          }
         }
         
+        // For all other items, keep them
         return true;
       });
       
-      // Make sure we maintain visual ordering by sorting by y-coordinate
-      if (finalItems.some(item => item.y !== undefined)) {
-        finalItems.sort((a, b) => {
-          const yA = a.y !== undefined ? a.y : Number.MAX_SAFE_INTEGER;
-          const yB = b.y !== undefined ? b.y : Number.MAX_SAFE_INTEGER;
-          return yA - yB;
+      console.log(`After second pass filtering: ${finalItems.length} items`);
+      
+      // Count tables after second pass
+      const tablesAfterSecondPass = finalItems.filter(item => item.type === 'table');
+      if (tablesAfterSecondPass.length > 0) {
+        console.log(`Tables after second pass filtering: ${tablesAfterSecondPass.length}`);
+        tablesAfterSecondPass.forEach((table, idx) => {
+          console.log(`SECOND-PASS TABLE #${idx+1}:`, {
+            headers: table.headers || [],
+            rows: table.rows || [],
+            headerCount: table.headers ? table.headers.length : 0,
+            rowCount: table.rows ? table.rows.length : 0
+          });
         });
-        
-        console.log(`Sorted ${finalItems.length} items by visual position for PDF`);
+      } else {
+        console.log('WARNING: No tables survived the second pass filtering!');
       }
       
-      return { ...message, items: finalItems };
+      // Return a new message object with the filtered items
+      return {
+        ...message,
+        items: finalItems
+      };
     });
+  }
+  
+  // Add the normalizeEquation function after the other helper functions in processMessagesForPDF
+  function normalizeEquation(eq) {
+    if (!eq) return '';
+    return eq.trim()
+      .replace(/\s+/g, '')                    // Remove all whitespace
+      .replace(/[=:]+/g, '=')                 // Normalize equals signs
+      .replace(/F=ma|F=m\*a|F=m×a/i, 'F=ma')  // Normalize Newton's law
+      .replace(/differentiatebothsideswithrespecttotime/i, 'dp/dt=d(mv)/dt')
+      .replace(/assumingmassmisconstant/i, 'dp/dt=mdv/dt')
+      .replace(/since=dv\/dt=a/i, 'F=ma')
+      .toLowerCase();                         // Case insensitive comparison
   }
   
   /**
@@ -841,8 +1112,9 @@ async function renderMessage(doc, message, startY, maxWidth) {
     startY = 20; // Reset to top of new page
   }
   
-  // Map 'Assistant' label to 'ChatGPT'
-  const speakerText = message.speaker === 'Assistant' ? 'ChatGPT' : message.speaker;
+  // Map 'Assistant' label to 'ChatGPT' and simplify labels
+  // Only show the name without "said" or other phrases
+  const speakerText = message.speaker === 'Assistant' ? 'ChatGPT' : 'User';
   
   doc.text(speakerText, 10, startY);
   
@@ -858,8 +1130,14 @@ async function renderMessage(doc, message, startY, maxWidth) {
   let isFirstItemOnPage = true;
   let isFirstPage = true; // Track if we're on the first page of this message
   
+  // Ensure message.items exists and is an array
+  if (!message.items || !Array.isArray(message.items)) {
+    console.warn('Message has no items array:', message);
+    message.items = []; // Set to empty array to prevent errors
+  }
+  
   // Sort message items by sequence if present
-  if (message.items && message.items.some(item => item.sequence !== undefined)) {
+  if (message.items.some(item => item.sequence !== undefined)) {
     message.items.sort((a, b) => {
       const seqA = a.sequence !== undefined ? a.sequence : 999;
       const seqB = b.sequence !== undefined ? b.sequence : 999;
@@ -873,38 +1151,71 @@ async function renderMessage(doc, message, startY, maxWidth) {
     let itemHeight = 0;
     
     if (item.type === 'text') {
+      // Handle regular text and bullet lists with proper line breaks
+      
       // Check if this is a header/subheader (ends with ":" and not too long)
       const isHeader = isHeaderText(item.content.trim());
       
-      // Estimate text height - with special handling for headers
-      const textContent = item.content.trim();
-      const isBullet = textContent.startsWith('•') || textContent.startsWith('*');
+      // Process heading-like text with bold style
+      if (isHeader) {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11); // Slightly larger font for headers
+        doc.setTextColor(35, 35, 35); // Light dark shade instead of solid black
+        
+        const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
+        doc.text(textLines, 15, currentY);
+        
+        // Reduce spacing after headers
+        const lineHeight = 4; // Reduced from 6 to 4
+        currentY += textLines.length * lineHeight + 0; // Removed extra +2 padding
+        
+        // Reset font for subsequent text
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+      } else {
+        // Check for bullet points to add indentation
+        const content = item.content.trim();
+        const isBullet = content.startsWith('•') || content.startsWith('*');
+        
+        // Check for numbered lists (1., 2., etc.)
+        const isNumberedList = /^\d+\.\s/.test(content);
       
       // Determine indentation level for bullet points
       let indentLevel = 0;
       if (isBullet) {
         // Check for visual indentation that might indicate a nested bullet
-        const leadingSpaces = textContent.match(/^[•*]\s+(\s*)/);
+          const leadingSpaces = content.match(/^[•*]\s+(\s*)/);
         if (leadingSpaces && leadingSpaces[1]) {
           indentLevel = Math.min(3, Math.floor(leadingSpaces[1].length / 2));
         }
         
         // Always apply at least one level of indentation for any bullet point
         indentLevel = Math.max(1, indentLevel);
-      }
-      
-      // Calculate available width for text considering indentation
-      const availableWidth = maxWidth - 20 - (indentLevel * 8);
-      const textLines = doc.splitTextToSize(textContent, availableWidth);
-      
-      if (isHeader) {
-        // Headers get more spacing
-        itemHeight = textLines.length * 4 + 0 + 5; // Reduced to 4pt line height + 0pt extra + 5pt item spacing
-      } else {
-        // Regular text
-        const lineSpacing = isBullet ? 3 : 5;
-        const extra = isBullet ? 2 : 3;
-        itemHeight = textLines.length * lineSpacing + extra + 5; // +5 for item spacing
+        } else if (isNumberedList) {
+          // Use similar indentation for numbered lists
+          indentLevel = 1;
+        }
+        
+        // Calculate indent amount - moderate indentation for bullet points and numbered lists
+        const indent = (isBullet || isNumberedList) ? 15 + (indentLevel * 3) : 15;
+        
+        // Add visual cue for nested bullet points - indent them more
+        const availableWidth = maxWidth - ((isBullet || isNumberedList) ? 30 : 20) - (indentLevel * 8);
+        const textLines = doc.splitTextToSize(content, availableWidth);
+        
+        // Use slightly lighter text color for regular paragraphs
+        doc.setTextColor(50, 50, 50); // Dark gray instead of black
+        
+        // Apply bullet point indentation
+        doc.text(textLines, indent, currentY);
+        
+        // Tighten bullet list spacing
+        const lineSpacing = (isBullet || isNumberedList) ? 3 : 5;
+        const extra = (isBullet || isNumberedList) ? 2 : 3;
+        currentY += textLines.length * lineSpacing + extra;
+        
+        // Reset text color to black for other elements
+        doc.setTextColor(0, 0, 0);
       }
     } else if (item.type === 'code') {
       // For code blocks, use a light grey background and monospace font
@@ -971,9 +1282,10 @@ async function renderMessage(doc, message, startY, maxWidth) {
         console.log('[PDF DEBUG] Added page break before code block');
       }
       
-      // Draw background
+      // Draw background with rounded corners
       doc.setFillColor(245, 245, 245);
-      doc.rect(20, currentY, blockWidth, blockHeight, 'F');
+      // Use roundedRect instead of rect for rounded corners
+      doc.roundedRect(20, currentY, blockWidth, blockHeight, 3, 3, 'F');
       
       // Draw code text
       doc.setTextColor(0, 0, 0);
@@ -1111,6 +1423,97 @@ async function renderMessage(doc, message, startY, maxWidth) {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(10);
       }
+    } else if (item.type === 'table') {
+      // Render table using autoTable with error handling
+      try {
+        console.log('Table rendering started:', {
+          headers: item.headers || [],
+          rows: item.rows || [],
+          headerCount: item.headers?.length || 0,
+          rowCount: item.rows?.length || 0
+        });
+        
+        // Check if autoTable plugin is available
+        if (typeof doc.autoTable !== 'function') {
+          console.error('autoTable plugin not available - table cannot be rendered');
+          // Fallback to basic text rendering of the table
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(0, 0, 0);
+          
+          const headers = item.headers || [];
+          const rows = item.rows || [];
+          
+          // Draw a box around the table area
+          const tableWidth = maxWidth - 10;
+          const rowHeight = 6;
+          const tableHeight = (rows.length + 1) * rowHeight;
+          
+          doc.setDrawColor(180, 180, 180);
+          doc.setFillColor(240, 240, 240);
+          doc.rect(15, currentY, tableWidth, tableHeight, 'S');
+          
+          // Draw headers
+          doc.setFont('helvetica', 'bold');
+          let colWidth = tableWidth / Math.max(headers.length, 1);
+          headers.forEach((header, i) => {
+            doc.text(header, 15 + (i * colWidth) + 2, currentY + 4);
+          });
+          
+          // Draw rows
+          doc.setFont('helvetica', 'normal');
+          rows.forEach((row, rowIdx) => {
+            const y = currentY + ((rowIdx + 1) * rowHeight) + 4;
+            row.forEach((cell, cellIdx) => {
+              doc.text(cell, 15 + (cellIdx * colWidth) + 2, y);
+            });
+          });
+          
+          currentY += tableHeight + 5;
+          console.log('Used fallback table rendering');
+        } else {
+          // Standard table rendering with autoTable
+          console.log('Using autoTable plugin for table rendering with data:', {
+            headers: item.headers || [],
+            rows: item.rows || [],
+            headArray: item.headers?.length > 0 ? [item.headers] : []
+          });
+          
+          // Make sure headers and rows are properly formed arrays
+          const headers = item.headers || [];
+          const rows = item.rows || [];
+          
+          doc.autoTable({
+            startY: currentY,
+            head: headers.length > 0 ? [headers] : [],
+            body: rows,
+            margin: { left: 15, right: 15 },
+            theme: 'grid',
+            styles: { fontSize: 8 },
+            didDrawPage: function(data) {
+              console.log('autoTable page drawn');
+            }
+          });
+          
+          // Update currentY to after the table
+          const finalY = doc.lastAutoTable?.finalY;
+          if (finalY) {
+            currentY = finalY + 5;
+            console.log('Table rendered with autoTable plugin, new Y position:', currentY);
+          } else {
+            console.error('ERROR: autoTable did not set finalY property. Tables may not be rendering properly.');
+            currentY += 20; // Assume some space used
+          }
+        }
+      } catch (tableError) {
+        console.error('Error rendering table:', tableError);
+        // Simple fallback showing error
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(9);
+        doc.setTextColor(150, 0, 0);
+        doc.text('Table rendering failed - plugin error', 15, currentY + 10);
+        currentY += 20; // Move down to continue with other content
+      }
     }
     
     // Check if we need a page break before this item
@@ -1147,61 +1550,7 @@ async function renderMessage(doc, message, startY, maxWidth) {
       currentY += 5;
     }
     
-    if (item.type === 'text') {
-      // Handle regular text and bullet lists with proper line breaks
-      
-      // Check if this is a header/subheader (ends with ":" and not too long)
-      const isHeader = isHeaderText(item.content.trim());
-      
-      // Process heading-like text with bold style
-      if (isHeader) {
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(11); // Slightly larger font for headers
-        
-        const textLines = doc.splitTextToSize(item.content, maxWidth - 20);
-        doc.text(textLines, 15, currentY);
-        
-        // Reduce spacing after headers
-        const lineHeight = 4; // Reduced from 6 to 4
-        currentY += textLines.length * lineHeight + 0; // Removed extra +2 padding
-        
-        // Reset font for subsequent text
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10);
-      } else {
-        // Check for bullet points to add indentation
-        const content = item.content.trim();
-        const isBullet = content.startsWith('•') || content.startsWith('*');
-        
-        // Determine indentation level for bullet points
-        let indentLevel = 0;
-        if (isBullet) {
-          // Check for visual indentation that might indicate a nested bullet
-          const leadingSpaces = content.match(/^[•*]\s+(\s*)/);
-          if (leadingSpaces && leadingSpaces[1]) {
-            indentLevel = Math.min(3, Math.floor(leadingSpaces[1].length / 2));
-          }
-          
-          // Always apply at least one level of indentation for any bullet point
-          indentLevel = Math.max(1, indentLevel);
-        }
-        
-        // Calculate indent amount - moderate indentation for bullet points
-        const indent = isBullet ? 15 + (indentLevel * 3) : 15;
-        
-        // Add visual cue for nested bullet points - indent them more
-        const availableWidth = maxWidth - (isBullet ? 30 : 20) - (indentLevel * 8);
-        const textLines = doc.splitTextToSize(content, availableWidth);
-        
-        // Apply bullet point indentation
-        doc.text(textLines, indent, currentY);
-        
-        // Tighten bullet list spacing
-        const lineSpacing = isBullet ? 3 : 5;
-        const extra = isBullet ? 2 : 3;
-        currentY += textLines.length * lineSpacing + extra;
-      }
-    } else if (item.type === 'image') {
+    if (item.type === 'image') {
       // Embed image
       try {
         const src = item.content;
@@ -1215,17 +1564,6 @@ async function renderMessage(doc, message, startY, maxWidth) {
       } catch (e) {
         console.warn('Failed to add image:', e);
       }
-    } else if (item.type === 'table') {
-      // Render table using autoTable
-      doc.autoTable({
-        startY: currentY,
-        head: [item.headers || []],
-        body: item.rows || [],
-        margin: { left: 15, right: 15 },
-        theme: 'grid',
-        styles: { fontSize: 8 }
-      });
-      currentY = doc.lastAutoTable.finalY + 5;
     }
     
     // Item rendered, no longer first on page
@@ -1612,7 +1950,42 @@ function isHeaderText(text) {
     'Derivation',
     'Methodology',
     'Where',
-    'Mathematically'
+    'Mathematically',
+    // Additional keywords for formatting
+    'Code',
+    'Function',
+    'Method',
+    'Class',
+    'Object',
+    'Data Structure',
+    'Variables',
+    'Constants',
+    'Parameters',
+    'Return Value',
+    'Imports',
+    'Exports',
+    'API',
+    'Interface',
+    'Problem Statement',
+    'Objective',
+    'Goal',
+    'Background',
+    'Context',
+    'Result',
+    'Evaluation',
+    'Testing',
+    'Debug',
+    'Error Handling',
+    'Edge Cases',
+    'Optimizations',
+    'Performance',
+    'Alternatives',
+    'Tradeoffs',
+    'Use Case',
+    'Scenario',
+    'Recommendations',
+    'Next Steps',
+    'Status'
   ];
   
   // Check if text is a common header pattern
@@ -1634,6 +2007,11 @@ function isHeaderText(text) {
   
   // Check for "How to" style headers which are common in ChatGPT
   if (normalized.startsWith('How to') && normalized.length < 60) {
+    return true;
+  }
+  
+  // Check for section-like patterns (numbered sections or specific format)
+  if (/^[1-9]\d*\.\s+[A-Z]/.test(normalized) || /^[A-Z][a-z]+ing\s+the/.test(normalized)) {
     return true;
   }
   
