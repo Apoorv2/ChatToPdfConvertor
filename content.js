@@ -1,860 +1,1216 @@
-// ChatGPT to PDF Converter - Content Script
-// Privacy: All processing is local using jsPDF and localStorage; no data is sent to servers.
+/**
+ * ChatGPT to PDF Converter - Content Script
+ * Handles all content extraction from ChatGPT's UI using DOM parsing
+ * and mutation observers for reliable capture of dynamic content.
+ * 
+ * Privacy: All processing is local; no data is sent to external servers.
+ */
 
-(() => {
-  const originalLog = console.log;
-  const originalError = console.error;
-  
-  // Override console.log
-  console.log = function(...args) {
-    // Call original method
-    originalLog.apply(console, args);
-    
-    // Send to background page too
-    try {
-      chrome.runtime.sendMessage({
-        action: 'log',
-        data: {
-          type: 'log',
-          message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')
-        }
-      });
-    } catch (e) {
-      // Ignore errors in sending
-    }
-  };
-  
-  // Override console.error
-  console.error = function(...args) {
-    // Call original method
-    originalError.apply(console, args);
-    
-    // Send to background page too
-    try {
-      chrome.runtime.sendMessage({
-        action: 'log',
-        data: {
-          type: 'error',
-          message: args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')
-        }
-      });
-    } catch (e) {
-      // Ignore errors in sending
-    }
-  };
-  
-  // Make a VERY loud console log
-  console.log('===== CONTENT SCRIPT LOADED AND CONSOLE OVERRIDDEN =====');
-})();
+// Add this at the top of content.js
+console.log('Content script loaded at:', new Date().toISOString());
 
-console.log("ChatGPT to PDF Converter: Content script loaded");
-
-// Set up a mutation observer to detect when new messages are loaded
-const setupMutationObserver = () => {
-  const targetNode = document.body;
-  
-  if (!targetNode) {
-    console.warn("ChatGPT to PDF Converter: Body element not found for observer");
-    return;
-  }
-  
-  const observer = new MutationObserver((mutations) => {
-    // Throttle observer to prevent excessive processing
-    if (!setupMutationObserver.timeout) {
-      setupMutationObserver.timeout = setTimeout(() => {
-        console.log("ChatGPT to PDF Converter: DOM changes detected");
-        setupMutationObserver.timeout = null;
-      }, 1000);
-    }
+// Add error handling for script injection
+window.onerror = function(msg, url, lineNo, columnNo, error) {
+  console.error('Content script error:', {
+    message: msg,
+    url: url,
+    lineNo: lineNo,
+    columnNo: columnNo,
+    error: error
   });
-  
-  observer.observe(targetNode, {
-    childList: true,
-    subtree: true
-  });
-  
-  console.log("ChatGPT to PDF Converter: Mutation observer set up");
-  return observer;
+  return false;
 };
 
-// Initialize mutation observer
-let observer = setupMutationObserver();
+// Send a console message to confirm loading
+console.log('ChatGPT PDF Converter content script LOADED at', new Date().toISOString());
 
-// Listen for messages from the popup
+// Add at the top of the file
+const DEBUG = true;
+
+function debugLog(...args) {
+  if (DEBUG) {
+    console.log('[ChatGPT-PDF]', ...args);
+  }
+}
+
+// Add this helper function at the top level (before or after getCodeLanguage)
+function isUIControl(text) {
+  if (!text) return false;
+  const lcText = text.toLowerCase().trim();
+  return lcText === 'java' || 
+         lcText === 'copy' || 
+         lcText === 'edit' || 
+         lcText === 'copy edit' ||
+         /^(javascript|python|typescript|html|css|json|xml|yaml|sql|c\+\+|c#|go|ruby|php)$/.test(lcText);
+}
+
+// Update the message listener in content.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log("ChatGPT to PDF Converter: Message received", request);
+  debugLog('Received message:', request);
   
   if (request.action === 'ping') {
-    console.log("ChatGPT to PDF Converter: Ping received, sending pong");
-    sendResponse({ pong: 'Content script is alive! ' + new Date().toLocaleTimeString() });
+    console.log('Received ping, responding with pong');
+    sendResponse({status: 'pong'});
     return true;
   }
   
-  if (request.action === "scrapeConversation") {
-    try {
-      console.log("ChatGPT to PDF Converter: Scraping conversation");
-      const conversation = scrapeConversation();
-      console.log("ChatGPT to PDF Converter: Conversation scraped successfully");
-      sendResponse({ success: true, data: conversation });
-    } catch (error) {
-      console.error("ChatGPT to PDF Converter: Error scraping conversation", error);
-      sendResponse({ success: false, error: error.message });
+  // Add handling for extractContentDirect
+  if (request.type === 'FROM_EXTENSION' && request.action === 'extractContentDirect') {
+    debugLog('Starting content extraction...');
+    
+    // Handle force parameter to reset processing
+    if (request.force) {
+      debugLog('Force re-extraction requested, resetting processed markers');
+      document.querySelectorAll('.processed').forEach(el => {
+        el.classList.remove('processed');
+      });
+      // Reset conversation data
+      conversationData = {
+        title: '',
+        messages: []
+      };
     }
-    return true; // Required for async sendResponse
+    
+    try {
+      const data = getConversationData();
+      debugLog('Extraction complete:', data);
+      
+      if (!data.messages || data.messages.length === 0) {
+        debugLog('No messages found in extracted data');
+        sendResponse({ success: false, error: 'No messages found in conversation' });
+        return false;
+      }
+      
+      chrome.storage.local.set({ chatContent: data }, () => {
+        debugLog('Content saved to storage');
+        sendResponse({ success: true, messageCount: data.messages.length });
+      });
+      
+      return true;
+    } catch (error) {
+      debugLog('Extraction error:', error);
+      sendResponse({ success: false, error: error.message });
+      return false;
+    }
   }
+  
+  return false; // No response for other messages
+});
+
+// Add at the beginning of content.js
+console.log('Content script loaded for ChatGPT to PDF conversion');
+
+// Store extracted conversation data
+let conversationData = {
+  title: '',
+  messages: []
+};
+
+// Track if we're currently observing
+let isObserving = false;
+
+// Initialize when the page loads
+initializeExtraction();
+
+// Debug helper
+function logDOMStructure() {
+  console.log('=== DOM Structure Analysis ===');
+  
+  // Check main containers
+  const mainContainer = document.querySelector('div.flex.flex-col.items-center');
+  console.log('Main container found:', !!mainContainer);
+  
+  // Check message containers
+  const messageContainers = document.querySelectorAll('div.group.w-full');
+  console.log('Message containers found:', messageContainers.length);
+  
+  // Check text content
+  const textElements = document.querySelectorAll('div[class*="text-base"], div[class*="markdown"]');
+  console.log('Text elements found:', textElements.length);
+  
+  console.log('=== End DOM Analysis ===');
+}
+
+// Call this when initializing
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('Content script initializing...');
+  logDOMStructure();
 });
 
 /**
- * Scrapes the ChatGPT conversation from the DOM
- * @returns {Object} Containing conversation title and structured message content
+ * Initialize the extraction process
  */
-function scrapeConversation() {
-  console.log("ChatGPT to PDF Converter: Starting conversation scraping");
+function initializeExtraction() {
+  console.log('Initializing ChatGPT content extraction');
   
-  // Get the current date for the header
-  const currentDate = new Date().toLocaleDateString();
-  let title = `ChatGPT Conversation, ${currentDate}`;
-  
-  // Try to get the actual conversation title if available
-  const titleElement = document.querySelector('title');
-  if (titleElement && titleElement.textContent) {
-    title = `ChatGPT: ${titleElement.textContent.trim()} (${currentDate})`;
-  }
-  
-  console.log("ChatGPT to PDF Converter: Acquired title:", title);
-  
-  // LOGGING THE ENTIRE DOM STRUCTURE - DEBUGGING ONLY
-  console.log("ChatGPT to PDF Converter: Examining DOM structure");
-  console.log("Body HTML:", document.body.innerHTML.substring(0, 1000) + "...");
-  
-  // Try multiple approaches to find message elements
-  
-  // Approach 1: Direct conversation turn selectors
-  let messageElements = document.querySelectorAll('[data-testid="conversation-turn"]');
-  console.log("Approach 1 found elements:", messageElements.length);
-  
-  // Approach 2: Chat message containers
-  if (messageElements.length === 0) {
-    messageElements = document.querySelectorAll('.text-message-content, .text-message');
-    console.log("Approach 2 found elements:", messageElements.length);
-  }
-  
-  // Approach 3: Message role attributes
-  if (messageElements.length === 0) {
-    messageElements = document.querySelectorAll('[data-message-author-role]');
-    console.log("Approach 3 found elements:", messageElements.length);
-  }
-  
-  // Approach 4: Any element with content that looks like chat
-  if (messageElements.length === 0) {
-    // Look for any elements that might be chat messages by content pattern
-    const allElements = document.querySelectorAll('div, p, span');
-    const possibleMessages = [];
-    
-    allElements.forEach(el => {
-      const text = el.textContent.trim();
-      // Check if the element contains a substantial amount of text
-      if (text.length > 50 && el.children.length < 5) {
-        possibleMessages.push(el);
-      }
-    });
-    
-    if (possibleMessages.length > 1) {
-      messageElements = possibleMessages;
-      console.log("Approach 4 found elements:", messageElements.length);
-    }
-  }
-  
-  // If still no elements, try a direct parent-child approach
-  if (messageElements.length === 0) {
-    const mainContent = document.querySelector('main');
-    if (mainContent) {
-      // Get all immediate div children of main content
-      const childDivs = mainContent.querySelectorAll(':scope > div');
-      console.log("Found child divs of main:", childDivs.length);
-      
-      if (childDivs.length > 0) {
-        // Get the div that has the most content (likely the conversation container)
-        let maxContentDiv = childDivs[0];
-        let maxLength = maxContentDiv.textContent.length;
-        
-        childDivs.forEach(div => {
-          if (div.textContent.length > maxLength) {
-            maxLength = div.textContent.length;
-            maxContentDiv = div;
-          }
-        });
-        
-        // Get all children of this div
-        const potentialMessages = maxContentDiv.querySelectorAll(':scope > div');
-        if (potentialMessages.length > 1) {
-          messageElements = potentialMessages;
-          console.log("Approach 5 found elements:", messageElements.length);
-        }
-      }
-    }
-  }
-  
-  // Final fallback - just grab paragraphs
-  if (messageElements.length === 0) {
-    messageElements = document.querySelectorAll('p');
-    console.log("Final fallback found elements:", messageElements.length);
-  }
-  
-  if (messageElements.length === 0) {
-    throw new Error("No messages found in the conversation. Try refreshing the page.");
-  }
-  
-  console.log("ChatGPT to PDF Converter: Found a total of", messageElements.length, "message elements");
-  
-  // Process each message to extract content
-  const messages = [];
-  let lastSpeaker = null;
-  let lastContent = null;
-  
-  Array.from(messageElements).forEach((element, index) => {
-    try {
-      // Determine speaker (user or assistant)
-      const isUser = isUserMessage(element);
-      const speaker = isUser ? 'You' : 'ChatGPT';
-      
-      // Skip if it's the same speaker as the last message AND has the same content
-      // This helps prevent duplication
-      const currentContent = element.textContent.trim();
-      if (speaker === lastSpeaker && currentContent === lastContent) {
-        return;
-      }
-      
-      lastSpeaker = speaker;
-      lastContent = currentContent;
-      
-      // Get timestamp if available
-      const timestamp = extractTimestamp(element) || '';
-      
-      // Process message content items (text, tables, etc.)
-      const messageItems = processMessageContent(element);
-      
-      console.log(`Message ${index}: Speaker=${speaker}, Items=${messageItems.length}`);
-      
-      if (messageItems.length > 0) {
-        messages.push({
-          speaker,
-          timestamp,
-          items: messageItems
-        });
-      }
-    } catch (error) {
-      console.error(`Error processing message element ${index}:`, error);
-    }
+  // Clear any existing processed markers
+  document.querySelectorAll('.processed').forEach(el => {
+    el.classList.remove('processed');
   });
   
-  console.log("ChatGPT to PDF Converter: Processed", messages.length, "messages");
-  
-  if (messages.length === 0) {
-    throw new Error("Could not extract any conversation content. Please try again.");
-  }
-  
-  // Add this temporary debugging code somewhere in your scrapeConversation function
-  // to test image extraction independently
-  try {
-    const testImages = document.querySelectorAll('img');
-    console.log(`DEBUG: Found ${testImages.length} total images on page`);
-    
-    testImages.forEach((img, i) => {
-      if (img.width > 50 && img.height > 50) {
-        console.log(`DEBUG: Image ${i}: Size=${img.width}x${img.height}, src=${img.src.substring(0, 100)}`);
-      }
-    });
-  } catch (e) {
-    console.error("Debug image test failed:", e);
-  }
-  
-  return {
-    title,
-    messages
+  // Reset conversation data
+  conversationData = {
+    title: '',
+    messages: []
   };
+  
+  // Set page title
+  updateConversationTitle();
+  
+  // Initial extraction of existing content
+  extractCurrentContent();
+  
+  // Setup observer for dynamic content
+  setupMutationObserver();
 }
 
 /**
- * Find message elements in the container
+ * Update the conversation title
  */
-function findMessageElements(container) {
-  console.log("ChatGPT to PDF Converter: Finding message elements");
+function updateConversationTitle() {
+  const title = document.title.replace(' - ChatGPT', '').trim();
+  conversationData.title = title || 'ChatGPT Conversation';
+}
+
+/**
+ * Extract all current content on the page
+ */
+function extractCurrentContent() {
+  debugLog('Extracting current content');
+  // Clear previous markers
+  document.querySelectorAll('.processed').forEach(el => el.classList.remove('processed'));
+
+  // Strategy 1: Articles inside main
+  let blocks = Array.from(document.querySelectorAll('main article'));
+  debugLog('extractCurrentContent: articles found:', blocks.length);
   
-  // Try various selectors to find message elements
-  const selectors = [
-    '[data-testid="conversation-turn"]',
-    '[data-message-author-role]',
-    '[class*="ConversationTurn"]',
-    '[class*="message"]',
-    'div'
+  // Strategy 2: data-testid conversation turns
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('[data-testid="conversation-turn"]'));
+    debugLog('extractCurrentContent: data-testid found:', blocks.length);
+  }
+  
+  // Strategy 3: ChatGPT group style
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('div.group.w-full'));
+    debugLog('extractCurrentContent: group.w-full found:', blocks.length);
+  }
+
+  // Strategy 4: fallback generic div patterns
+  if (blocks.length === 0) {
+    blocks = Array.from(document.querySelectorAll('div[class*="min-h-"]'));
+    debugLog('extractCurrentContent: generic min-h- found:', blocks.length);
+  }
+
+  // Process each block, skipping duplicates
+  let count = 0;
+  let lastBlockText = '';
+  blocks.forEach((block, idx) => {
+    if (!isValidMessageBlock(block)) return;
+    const text = block.innerText.trim();
+    if (text && text === lastBlockText) return; // skip duplicate block
+    lastBlockText = text;
+    processMessageBlock(block, idx);
+    count++;
+  });
+  debugLog('extractCurrentContent: processed count', count);
+
+  if (blocks.length > 0) {
+    debugLog('First block HTML snippet:', blocks[0].outerHTML.substring(0, 200));
+  }
+}
+
+function isValidMessageBlock(block) {
+  // Skip empty blocks or those with only whitespace/newlines
+  if (!block.textContent.trim()) {
+    return false;
+  }
+  
+  // Skip system messages and UI elements
+  const unwantedClasses = ['cursor-pointer', 'absolute', 'hidden'];
+  if (unwantedClasses.some(cls => block.className.includes(cls))) {
+    return false;
+  }
+  
+  return true;
+}
+
+function extractMessageData(block) {
+  try {
+    // Determine if this is a user message
+    const isUser = block.closest('div[class*="dark:bg-gray-800"]') || 
+                  block.querySelector('[data-message-author-role="user"]');
+    
+    const speaker = isUser ? 'User' : 'Assistant';
+    const timestamp = new Date().toLocaleTimeString();
+    
+    const items = [];
+    
+    // Extract code blocks first
+    const codeBlocks = block.querySelectorAll('pre');
+    codeBlocks.forEach(pre => {
+      const code = pre.querySelector('code');
+      if (code) {
+        const language = getCodeLanguage(pre);
+        items.push({
+          type: 'code',
+          content: code.textContent.trim(),
+          language: language
+        });
+      }
+    });
+    
+    // Extract text segments (multiple markdown/text containers)
+    const textContainers = block.querySelectorAll(
+      'div[class*="markdown"], div[class*="text-base"]'
+    );
+    textContainers.forEach(container => {
+      // Skip code block containers
+      if (container.querySelector('pre, code')) return;
+      const rawText = container.innerText.trim();
+      if (rawText) {
+        items.push({ type: 'text', content: sanitizeTextForPDF(rawText) });
+        debugLog('Found text:', rawText);
+      }
+    });
+    
+    // Only return if we have content
+    if (items.length > 0) {
+      return {
+        speaker,
+        timestamp,
+        items
+      };
+    }
+  } catch (error) {
+    console.error('Error extracting message data:', error);
+  }
+  
+  return null;
+}
+
+function getCodeLanguage(preElement) {
+  if (!preElement) return '';
+  
+  const classes = preElement.className.split(' ');
+  for (const cls of classes) {
+    if (cls.startsWith('language-')) {
+      return cls.replace('language-', '');
+    }
+  }
+  return '';
+}
+
+/**
+ * CRITICAL: Do not modify; handles image-to-data-URL conversion
+ * Convert image to data URL
+ */
+function imageToDataURL(imgSrc) {
+  return new Promise((resolve, reject) => {
+    try {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      img.onload = function() {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          
+          const dataURL = canvas.toDataURL('image/jpeg');
+          resolve(dataURL);
+        } catch (error) {
+          console.warn('Skipping tainted image due to CORS:', error);
+          reject(error);
+        }
+      };
+      
+      img.onerror = function(error) {
+        console.warn('Error loading image:', error);
+        reject(error);
+      };
+      
+      img.src = imgSrc;
+    } catch (error) {
+      console.warn('Error creating image:', error);
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Sanitize text for PDF output
+ */
+function sanitizeTextForPDF(text) {
+  if (!text) return '';
+  // Remove any script-like content
+  if (text.includes('window.') || text.includes('document.') || text.includes('function(')) {
+    return '';
+  }
+  // Strip out non-ASCII and control characters (keep printable ASCII 0x20-0x7E)
+  const cleaned = text.replace(/[^\x20-\x7E]+/g, ' ')
+                      // Collapse whitespace
+                      .replace(/\s+/g, ' ')
+                      .trim();
+  return cleaned;
+}
+
+/**
+ * Extract and format equations
+ */
+function formatEquation(equation) {
+  if (!equation) return '';
+  
+  // Fix repeated characters in variable names
+  let formatted = equation.replace(/([A-Za-z])\1{2,}/g, '$1');
+  
+  // Remove excess whitespace
+  formatted = formatted.trim();
+  
+  // Make fractions more readable
+  formatted = formatted
+    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, '$1/$2')
+    .replace(/\\frac ([^{])(.) ([^{])(.)/g, '$1$2/$3$4');
+  
+  // Fix spacing around operators
+  formatted = formatted
+    .replace(/([0-9a-zA-Z])\+/g, '$1 + ')
+    .replace(/\+([0-9a-zA-Z])/g, '+ $1')
+    .replace(/([0-9a-zA-Z])-/g, '$1 - ')
+    .replace(/-([0-9a-zA-Z])/g, '- $1')
+    .replace(/([0-9a-zA-Z])\*/g, '$1 × ')
+    .replace(/\*([0-9a-zA-Z])/g, '× $1');
+  
+  // Fix common symbols
+  formatted = formatted
+    .replace(/\\alpha/g, 'α')
+    .replace(/\\beta/g, 'β')
+    .replace(/\\gamma/g, 'γ')
+    .replace(/\\delta/g, 'δ')
+    .replace(/\\theta/g, 'θ')
+    .replace(/\\pi/g, 'π')
+    .replace(/\\sigma/g, 'σ')
+    .replace(/\\mu/g, 'μ')
+    .replace(/\\infty/g, '∞')
+    .replace(/\\times/g, '×')
+    .replace(/\\cdot/g, '·')
+    .replace(/\\div/g, '÷')
+    .replace(/\\approx/g, '≈')
+    .replace(/\\neq/g, '≠')
+    .replace(/\\ne/g, '≠')
+    .replace(/\\geq/g, '≥')
+    .replace(/\\leq/g, '≤');
+    
+  // Clean up any remaining LaTeX commands
+  formatted = formatted
+    .replace(/\\[a-zA-Z]+/g, '') // Remove any other LaTeX commands
+    .replace(/\{|\}/g, '')      // Remove curly braces
+    .replace(/\\left|\\right/g, '');  // Remove left/right commands
+    
+  // Final cleanup
+  formatted = formatted
+    .replace(/\s+/g, ' ')       // Normalize spaces
+    .trim();
+    
+  return formatted;
+}
+
+function isValidContent(text) {
+  if (!text) return false;
+  
+  const unwantedPatterns = [
+    'window.__oai',
+    'window._oai',
+    'request Animation Frame',
+    'Search Reason',
+    'HTML?window',
+    'SSR_HTML',
+    'TTI?window',
+    'Date.now()',
+    'undefined'
   ];
   
-  const result = [];
-  
-  for (const selector of selectors) {
-    const elements = container.querySelectorAll(selector);
-    if (elements && elements.length > 1) {
-      result.push(...Array.from(elements));
-    }
-  }
-  
-  // If no matches, return direct children as fallback using children property
-  if (result.length === 0 && container.children && container.children.length > 0) {
-    result.push(...Array.from(container.children));
-  }
-  
-  // Filter out duplicates and nulls
-  const uniqueElements = [...new Set(result)].filter(el => el);
-  
-  console.log(`ChatGPT to PDF Converter: Found ${uniqueElements.length} message elements`);
-  return uniqueElements;
+  text = text.trim();
+  return text.length > 0 && 
+         !unwantedPatterns.some(pattern => text.includes(pattern)) &&
+         !/^[\s\d.]+$/.test(text); // Skip if only numbers/spaces/dots
 }
 
-/**
- * Determine if a message is from the user
- */
-function isUserMessage(element) {
-  // Check for various indicators that this is a user message
+// Add this function to content.js
+function getConversationData() {
+  debugLog('Getting conversation data for PDF generation');
+  // Reset any previous messages and update title
+  conversationData.messages = [];
+  updateConversationTitle();
+  debugLog('Title:', conversationData.title);
   
-  // Check 1: data-testid attribute
-  if (element.querySelector('[data-testid="not-chat-gpt-user-message"]')) {
-    console.log("User message detected via data-testid");
-    return true;
-  }
+  // Run structured extraction to populate messages
+  extractCurrentContent();
+  debugLog(`After structured pass, found ${conversationData.messages.length} messages`);
   
-  // Check 2: author role attribute
-  if (element.getAttribute('data-message-author-role') === 'user') {
-    console.log("User message detected via author role");
-    return true;
-  }
+  // --- Structured extraction logic ---
+  // (find mainContainer, messageGroups, call processMessageBlock as before)
+  // e.g.:
+  // const mainContainer = document.querySelector('div[class*="react-scroll-to-bottom"], div[class*="flex-1 overflow-hidden"]');
+  // if (mainContainer) { /* process messageGroups */ }
   
-  // Check 3: look for specific class names or patterns
-  if (element.classList.contains('user-message') || 
-      element.classList.contains('outgoing') ||
-      element.parentElement?.classList.contains('user-message')) {
-    console.log("User message detected via class names");
-    return true;
-  }
-  
-  // Check 4: Analyze position in conversation (odd/even pattern)
-  const parent = element.parentElement;
-  if (parent && parent.children) {
-    const index = Array.from(parent.children).indexOf(element);
-    if (index % 2 === 0) { // Assuming user messages come first in pairs
-      console.log("User message detected via position (even index)");
-      return true;
-    }
-  }
-  
-  // Default to false (assumes ChatGPT message)
-  return false;
-}
-
-/**
- * Extract timestamp from message element
- */
-function extractTimestamp(element) {
-  // Try to find timestamp element
-  const timestampElement = element.querySelector('[class*="timestamp"], time, [class*="date"]');
-  return timestampElement ? timestampElement.textContent.trim() : null;
-}
-
-/**
- * Process message content to extract text, tables, images, equations
- */
-function processMessageContent(element) {
-  const items = [];
-  
-  try {
-    console.log("Processing element:", element.tagName, element.className);
-    
-    // First, extract all the text content
-    const allText = element.textContent.trim();
-    
-    // If there's any text, add it as a basic item
-    if (allText.length > 0) {
-      items.push({
-        type: 'text',
-        content: processText(allText)
+  // FALLBACK: if no structured messages, grab entire page text
+  if (conversationData.messages.length === 0) {
+    debugLog('No structured messages found – falling back to plain text');
+    const raw = document.body.innerText.trim();
+    if (raw) {
+      conversationData.messages.push({
+        speaker: 'ChatGPT Conversation',
+        timestamp: new Date().toLocaleTimeString(),
+        items: [{ type: 'text', content: sanitizeTextForPDF(raw) }]
       });
-      console.log("Added text content:", allText.substring(0, 50) + (allText.length > 50 ? "..." : ""));
     }
-    
-    // Look for tables in the element
-    const tables = element.querySelectorAll('table');
+  }
+
+  // Add table detection diagnostics
+  let totalTables = 0;
+  conversationData.messages.forEach(message => {
+    const tables = message.items.filter(item => item.type === 'table');
     if (tables.length > 0) {
-      console.log("Found", tables.length, "tables in the element");
-      
-      tables.forEach((table, i) => {
-        try {
-          const tableData = extractTable(table);
-          if (tableData.rows.length > 0) {
-            items.push({
-              type: 'table',
-              content: tableData
-            });
-            console.log(`Added table ${i+1} with ${tableData.rows.length} rows`);
-          }
-        } catch (error) {
-          console.error("Error extracting table:", error);
-        }
+      totalTables += tables.length;
+      debugLog(`Found ${tables.length} tables in message from ${message.speaker}`);
+      tables.forEach((table, idx) => {
+        debugLog(`Table ${idx+1}: ${table.headers?.length || 0} headers, ${table.rows?.length || 0} rows`);
       });
-    } else if (allText.includes('|')) {
-      // Try to extract markdown-style tables from the text
-      try {
-        const markdownTable = extractMarkdownTable(allText);
-        if (markdownTable.rows.length > 0) {
-          items.push({
-            type: 'table',
-            content: markdownTable
-          });
-          console.log(`Added markdown table with ${markdownTable.rows.length} rows`);
-        }
-      } catch (error) {
-        console.error("Error extracting markdown table:", error);
-      }
-    }
-    
-    // Extract and add images
-    const imageItems = processImages(element);
-    items.push(...imageItems);
-    
-    // Extract and add equations
-    const equationItems = processEquations(element);
-    items.push(...equationItems);
-  } catch (error) {
-    console.error("Error processing message content:", error);
-  }
-  
-  return items;
-}
-
-/**
- * Process text to handle equations and formatting
- */
-function processText(text) {
-  // Replace any LaTeX equations with plain text representation
-  let processed = text.replace(/\\\((.+?)\\\)/g, "$1");
-  processed = processed.replace(/\$(.+?)\$/g, "$1");
-  
-  // Process emojis
-  processed = processEmojis(processed);
-  
-  return processed;
-}
-
-/**
- * Extract table data from HTML table element
- */
-function extractTable(tableElement) {
-  const headers = [];
-  const rows = [];
-  
-  // Extract headers from thead if available
-  const headerElements = tableElement.querySelectorAll('thead th, th');
-  if (headerElements.length > 0) {
-    headerElements.forEach(th => {
-      headers.push(th.textContent.trim());
-    });
-  }
-  
-  // Extract rows (limited to 10)
-  const rowElements = tableElement.querySelectorAll('tbody tr, tr');
-  Array.from(rowElements).slice(0, 10).forEach(tr => {
-    const rowData = [];
-    tr.querySelectorAll('td').forEach(td => {
-      rowData.push(td.textContent.trim());
-    });
-    if (rowData.length > 0) {
-      rows.push(rowData);
     }
   });
-  
+  debugLog(`Total tables found in conversation: ${totalTables}`);
+
+  // Always return at least one message
   return {
-    headers,
-    rows
+    title:    conversationData.title,
+    messages: [...conversationData.messages]
   };
 }
 
-/**
- * Process emojis in text
- */
-function processEmojis(text) {
-  // Replace common emojis with text descriptions
-  const emojiMap = {
-    '🗓️': '[Calendar] ',
-    '📆': '[Calendar] ',
-    '🏋️‍♂️': '[Fitness] ',
-    '🏋️': '[Fitness] ',
-    '💪': '[Strength] ',
-    '✅': '[Checkmark] ',
-    '⭐': '[Star] ',
-    '📊': '[Chart] ',
-    '⚠️': '[Warning] ',
-    '❗': '[Important] ',
-    '👍': '[Thumbs Up] '
-  };
-  
-  // Replace known emojis
-  let processed = text;
-  for (const [emoji, replacement] of Object.entries(emojiMap)) {
-    processed = processed.replaceAll(emoji, replacement);
-  }
-  
-  // Replace any remaining emojis
-  const emojiRegex = /[\p{Emoji}]/gu;
-  processed = processed.replace(emojiRegex, '[Emoji] ');
-  
-  return processed;
-}
-
-/**
- * Extract markdown-style table
- */
-function extractMarkdownTable(markdownText) {
-  console.log("Trying to extract markdown table from:", markdownText.substring(0, 100) + "...");
-  
-  // Look for lines containing pipe characters - these are likely table rows
-  const tableLines = markdownText.split('\n').filter(line => line.includes('|'));
-  
-  if (tableLines.length < 2) {
-    console.log("Not enough lines with pipe characters for a table");
-    return { headers: [], rows: [] };
-  }
-  
-  console.log("Found potential markdown table with", tableLines.length, "lines");
-  
-  const headers = [];
-  const rows = [];
-  
-  // Extract headers from the first line
-  const headerLine = tableLines[0];
-  headerLine.split('|').forEach(cell => {
-    const header = cell.trim();
-    if (header) headers.push(header);
-  });
-  
-  // Skip the first line (headers) and the second line (separator)
-  for (let i = 2; i < tableLines.length && i < 12; i++) {
-    const rowData = [];
-    tableLines[i].split('|').forEach(cell => {
-      rowData.push(cell.trim());
-    });
-    
-    if (rowData.some(cell => cell.length > 0)) {
-      rows.push(rowData.filter(cell => cell.length > 0));
-    }
-  }
-  
-  console.log("Extracted table headers:", headers);
-  console.log("Extracted table rows:", rows);
-  
-  return {
-    headers,
-    rows
-  };
-}
-
-/**
- * Process images with CORS handling - add visible placeholders
- */
-function processImages(element) {
-  const imageItems = [];
-  
+// Update the message processing function
+function processMessageBlock(block, index) {
+  debugLog(`Processing message block ${index}`);
   try {
-    // Get all images in this element
-    const images = element.querySelectorAll('img');
-    console.log(`Found ${images.length} image elements in message`);
+    if (block.classList.contains('processed')) return;
+    block.classList.add('processed');
     
-    // Process each image
-    Array.from(images).forEach((img, i) => {
-      // Skip tiny images that are likely icons
-      if (img.width < 60 || img.height < 60 || !img.src) {
-        return;
-      }
-      
-      console.log(`Processing image ${i+1}: ${img.width}x${img.height}, src: ${img.src.substring(0, 100)}`);
-      
-      // For all images, create a placeholder item with metadata
-      imageItems.push({
-        type: 'imagePlaceholder',
-        originalSrc: img.src,
-        width: img.width,
-        height: img.height,
-        isDataUrl: img.src.startsWith('data:')
-      });
-      
-      // If it's a data URL, we can also try to include the actual image
-      if (img.src.startsWith('data:image/')) {
-        imageItems.push({
-          type: 'image',
-          content: img.src,
-          width: img.width,
-          height: img.height
-        });
-      }
-    });
-    
-    console.log(`Added ${imageItems.length} image items`);
-  } catch (error) {
-    console.error("Error processing images:", error);
-  }
-  
-  return imageItems;
-}
-
-/**
- * Extract and process equations from content
- */
-function processEquations(element) {
-  const equationItems = [];
-  
-  try {
-    // Look for KaTeX elements
-    const katexElements = element.querySelectorAll('.katex, .katex-display, .katex-block');
-    if (katexElements.length > 0) {
-      console.log(`Found ${katexElements.length} KaTeX elements`);
-      
-      katexElements.forEach((katex, i) => {
-        try {
-          // Find the LaTeX source (often in a data attribute or hidden element)
-          let latexSource = '';
-          
-          // Try different methods to get the LaTeX source
-          const annotation = katex.querySelector('.katex-mathml annotation');
-          if (annotation) {
-            latexSource = annotation.textContent;
-          } else {
-            // Get textContent as fallback
-            latexSource = katex.textContent;
-          }
-          
-          if (latexSource) {
-            equationItems.push({
-              type: 'equation',
-              content: latexSource
-            });
-            console.log(`Added equation ${i+1}: ${latexSource.substring(0, 30)}...`);
-          }
-        } catch (eqError) {
-          console.error(`Error extracting equation ${i+1}:`, eqError);
-        }
-      });
+    // Skip processing if this is a UI control element
+    if (block.classList.contains('ui-control-ignore') || isUIControl(block.textContent)) {
+      debugLog('Skipping UI control block:', block.textContent);
+      return;
     }
     
-    // Look for LaTeX delimiters in text
-    const textContent = element.textContent;
-    const delimiters = [
-      { start: '\\(', end: '\\)' },
-      { start: '\\[', end: '\\]' },
-      { start: '$$', end: '$$' },
-      { start: '$', end: '$' }
-    ];
+    let isUser = false;
+    const userRoleEl = block.querySelector('[data-message-author-role="user"]');
+    if (userRoleEl) isUser = true;
+    else {
+      const parentRole = block.closest('[data-message-author-role]');
+      if (parentRole) isUser = parentRole.getAttribute('data-message-author-role') === 'user';
+      else if (block.classList.contains('dark:bg-gray-800')) isUser = true;
+    }
+    const speaker = isUser ? 'User' : 'Assistant';
+    const timestamp = new Date().toLocaleTimeString();
+    const items = [];
     
-    for (const delimiter of delimiters) {
-      let startIdx = 0;
-      while ((startIdx = textContent.indexOf(delimiter.start, startIdx)) !== -1) {
-        const endIdx = textContent.indexOf(delimiter.end, startIdx + delimiter.start.length);
-        if (endIdx !== -1) {
-          const equation = textContent.substring(startIdx + delimiter.start.length, endIdx);
-          if (equation.length > 0 && equation.length < 1000) { // Reasonable size check
-            equationItems.push({
-              type: 'equation',
-              content: equation.trim()
-            });
-            console.log(`Found inline equation: ${equation.substring(0, 30)}...`);
+    // Add visual position tracking
+    const blockY = block.getBoundingClientRect().top;
+    
+    // First, try to extract the initial text separately
+    // Find the first text node or paragraph before any special elements
+    let initialText = '';
+    
+    // Look for the main content container in modern ChatGPT UI
+    const contentContainer = block.querySelector('div[data-message-text-content="true"], div[data-message-content="true"]');
+    
+    if (contentContainer) {
+      // Check if there's direct text content before any structured elements
+      const children = Array.from(contentContainer.childNodes);
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        // Check if it's a text node or a simple paragraph without complex content
+        if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+          initialText += child.textContent.trim() + ' ';
+        } else if (
+          child.nodeType === Node.ELEMENT_NODE && 
+          child.tagName === 'P' && 
+          !child.querySelector('code, pre, span.katex, table, img')
+        ) {
+          initialText += child.textContent.trim() + ' ';
+        } else if (
+          child.nodeType === Node.ELEMENT_NODE &&
+          child.tagName !== 'CODE' &&
+          child.tagName !== 'PRE' &&
+          !child.classList.contains('katex') &&
+          !child.querySelector('code, pre, span.katex, table, img')
+        ) {
+          // Check simple div with just text
+          const hasComplexChild = Array.from(child.children).some(el => 
+            el.tagName === 'CODE' || 
+            el.tagName === 'PRE' || 
+            el.classList.contains('katex') ||
+            el.tagName === 'TABLE' ||
+            el.tagName === 'IMG'
+          );
+          
+          if (!hasComplexChild && child.textContent.trim()) {
+            initialText += child.textContent.trim() + ' ';
           }
-          startIdx = endIdx + delimiter.end.length;
         } else {
+          // Stop when we hit a complex element
           break;
         }
       }
     }
-  } catch (error) {
-    console.error("Error processing equations:", error);
-  }
-  
-  return equationItems;
-}
-
-// Log that setup is complete
-console.log("ChatGPT to PDF Converter: Content script initialized");
-
-// Add this at the end of your content.js file
-(function() {
-  // Force-run this immediately when script loads
-  console.log('IMMEDIATE IMAGE TEST RUNNING ON PAGE LOAD');
-  
-  // Find ALL images on the page
-  const allImages = Array.from(document.querySelectorAll('img'));
-  console.log(`FOUND ${allImages.length} TOTAL IMAGES ON THE PAGE`);
-  
-  // Log statistics about these images
-  let dataUrlImages = 0;
-  let regularImages = 0;
-  let svgImages = 0;
-  let smallImages = 0;
-  let largeImages = 0;
-  
-  allImages.forEach((img, i) => {
-    if (img.src) {
-      if (img.src.startsWith('data:image/svg')) {
-        svgImages++;
-      } else if (img.src.startsWith('data:')) {
-        dataUrlImages++;
-        console.log(`DATA URL IMAGE: ${img.width}x${img.height}, preview: ${img.src.substring(0, 50)}...`);
-      } else {
-        regularImages++;
-        console.log(`URL IMAGE: ${img.width}x${img.height}, src: ${img.src.substring(0, 100)}`);
-      }
-      
-      if (img.width > 100 && img.height > 100) {
-        largeImages++;
-      } else {
-        smallImages++;
-      }
-    }
-  });
-  
-  console.log(`IMAGE STATS: 
-    - Total: ${allImages.length}
-    - Data URLs: ${dataUrlImages}
-    - Regular URLs: ${regularImages}
-    - SVGs: ${svgImages}
-    - Large (>100px): ${largeImages}
-    - Small: ${smallImages}
-  `);
-  
-  // Look for ChatGPT message containers
-  const messageTurns = document.querySelectorAll('[data-testid="conversation-turn"]');
-  console.log(`FOUND ${messageTurns.length} CONVERSATION TURNS`);
-  
-  messageTurns.forEach((turn, i) => {
-    const turnImages = turn.querySelectorAll('img');
-    if (turnImages.length > 0) {
-      console.log(`TURN ${i} HAS ${turnImages.length} IMAGES`);
-      
-      turnImages.forEach((img, j) => {
-        console.log(`TURN ${i} IMAGE ${j}: ${img.width}x${img.height}, src: ${img.src ? img.src.substring(0, 50) : 'none'}`);
+    
+    // If we found initial text and it's valid, add it to items
+    if (initialText.trim() && isValidContent(initialText.trim())) {
+      debugLog('Found initial text:', initialText.trim());
+      items.push({ 
+        type: 'text', 
+        content: sanitizeTextForPDF(initialText.trim()),
+        y: blockY // Store y-position
       });
     }
-  });
-})();
 
-// Add this function to test image extraction directly
-function testDirectImageExtraction() {
-  console.log("=== DIRECT IMAGE EXTRACTION TEST ===");
-  
-  // Find all potentially usable images
-  const allImages = document.querySelectorAll('img');
-  const usableImages = Array.from(allImages).filter(img => 
-    img.width > 100 && 
-    img.height > 100 && 
-    img.src && 
-    !img.src.includes('svg')
-  );
-  
-  console.log(`Found ${usableImages.length} potentially usable images`);
-  
-  // Try the simplest possible approach
-  usableImages.forEach((img, i) => {
-    try {
-      console.log(`Testing image ${i}: ${img.src.substring(0, 50)}`);
-      
-      // Create a direct data URL 
-      if (img.src.startsWith('data:')) {
-        console.log(`Image ${i} is already a data URL`);
-        
-        // Test if this data URL could be added to a PDF
-        const testPdf = new jsPDF();
-        testPdf.addImage(img.src, 'JPEG', 10, 10, 50, 50);
-        console.log(`Successfully added image ${i} to test PDF`);
-      }
-      else {
-        // For URLs, just log that we'd need to convert them
-        console.log(`Image ${i} is a URL, would need conversion`);
-      }
-    } catch (e) {
-      console.error(`Test failed for image ${i}:`, e);
+    // Enhanced equation detection - check entire block first for common equation patterns
+    const blockText = block.innerText;
+    const hasEquationPatterns = /F\s*=\s*m\s*a|E\s*=\s*m\s*c\^?2|p\s*=\s*m\s*v|dt\s+d[pv]|\\frac|\\partial|d\/dx|\\nabla|\\alpha|\\beta|\\\[|\\begin\{equation\}/.test(blockText);
+    
+    debugLog('Block may contain equations:', hasEquationPatterns);
+    
+    // Keep track of extracted equation content to avoid duplicates
+    const extractedEquationContent = new Set();
+    
+    // Helper function to normalize equations for comparing
+    function normalizeEquation(eq) {
+      if (!eq) return '';
+      return eq.trim()
+        .replace(/\s+/g, '')
+        .replace(/[=:]+/g, '=')
+        .replace(/F=ma|F=m\*a|F=m×a/i, 'F=ma')
+        .replace(/differentiatebothsideswithrespecttotime/i, 'dp/dt=d(mv)/dt')
+        .replace(/assumingmassmisconstant/i, 'dp/dt=mdv/dt')
+        .replace(/since=dv\/dt=a/i, 'F=ma')
+        .toLowerCase();
     }
-  });
-}
-
-// Call the test function after a delay
-setTimeout(testDirectImageExtraction, 3000);
-
-/**
- * Extract conversation with better handling of structured content
- */
-function extractConversation() {
-  try {
-    console.log("Extracting conversation with improved structure...");
     
-    const conversation = {
-      title: document.title,
-      messages: []
-    };
-    
-    // Find all conversation turns
-    const turns = document.querySelectorAll('[data-testid="conversation-turn"]');
-    console.log(`Found ${turns.length} conversation turns`);
-    
-    // Process each turn
-    turns.forEach((turn, index) => {
-      // Determine if this is the user or ChatGPT
-      const isUser = turn.querySelector('[data-testid="not-chat-gpt-user-message"]') !== null;
-      const speaker = isUser ? 'You' : 'ChatGPT';
-      
-      // Get all content parts to preserve structure
-      const messageContainers = turn.querySelectorAll('[data-message-author-role]');
-      const messageItems = [];
-      
-      // Process all content in this message
-      messageContainers.forEach(container => {
-        // Extract text paragraphs, preserving structure
-        const textParagraphs = container.querySelectorAll('p, h1, h2, h3, h4, h5, li');
-        textParagraphs.forEach(para => {
-          // Only add non-empty paragraphs
-          if (para.textContent.trim()) {
-            messageItems.push({
-              type: 'text',
-              content: para.textContent
+    if (hasEquationPatterns) {
+      // Look for specific Physics equation lines
+      const textLines = blockText.split('\n');
+      textLines.forEach((line, lineIndex) => {
+        const trimmedLine = line.trim();
+        if (
+          /^F\s*=\s*m\s*a$/.test(trimmedLine) ||
+          /^p\s*=\s*m\s*v$/.test(trimmedLine) ||
+          /^E\s*=\s*m\s*c\^?2$/.test(trimmedLine) ||
+          /^[•*]\s*F\s+is\s+.*force/.test(trimmedLine) ||
+          /^[•*]\s*p\s+is\s+.*momentum/.test(trimmedLine) ||
+          /^[•*]\s*=\s*p\s*=\s*m\s*v/.test(trimmedLine) ||
+          /^[•*]\s*Start\s+with\s+momentum/.test(trimmedLine) ||
+          /^[•*]\s*Differentiate\s+both\s+sides/.test(trimmedLine) ||
+          /^[•*]\s*Assuming\s+mass\s+m\s+is\s+constant/.test(trimmedLine) ||
+          /^[•*]\s*Since\s+.*=\s*dt\s+dv\s*=/.test(trimmedLine) ||
+          /^[•*]\s*Therefore/.test(trimmedLine) ||
+          /^[•*]\s*Newton/.test(trimmedLine)
+        ) {
+          const normalized = normalizeEquation(trimmedLine);
+          if (!extractedEquationContent.has(normalized)) {
+            debugLog('Found Physics equation line:', trimmedLine);
+            // Estimate y-position based on line index and block position
+            const estimatedY = blockY + (lineIndex * 20); // Approximate line height
+            items.push({ 
+              type: 'equation', 
+              content: trimmedLine, 
+              y: estimatedY
             });
+            extractedEquationContent.add(normalized);
+          }
+        }
+      });
+    }
+    
+    const segs = block.querySelectorAll(
+      'h1,h2,h3,h4,h5,h6,' +
+      'p,' +
+      'div[class*="markdown"],div[class*="text-base"],' +
+      'ul,ol,' +
+      'pre,' +
+      'table,' +
+      'img,' +
+      'span.katex'
+    );
+    debugLog('Block segments count:', segs.length);
+    segs.forEach(el => {
+      // Get visual position (y-coordinate) for this element
+      const elementRect = el.getBoundingClientRect();
+      const elementY = elementRect.top;
+      
+      // 1) Extract code blocks first
+      if (el.tagName === 'PRE') {
+        const codeEl = el.querySelector('code');
+        if (codeEl) {
+          const content = codeEl.textContent.trim();
+          const language = getCodeLanguage(el);
+          items.push({ 
+            type: 'code', 
+            content, 
+            language, 
+            y: elementY,
+            isCodeBlock: true // Mark as code block for filtering related UI elements
+          });
+          debugLog('Code block found:', language, content);
+          
+          // Mark any nearby "Copy" or "Edit" buttons or language indicators to be ignored
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            const index = siblings.indexOf(el);
+            
+            // Mark siblings that are likely UI controls
+            for (let i = index - 1; i <= index + 3 && i < siblings.length; i++) {
+              if (i >= 0 && i !== index) {
+                const sibling = siblings[i];
+                const siblingText = sibling.textContent.trim().toLowerCase();
+                
+                if (siblingText === 'java' || 
+                    siblingText === 'copy' || 
+                    siblingText === 'edit' ||
+                    siblingText === 'copy edit' ||
+                    /^(javascript|python|typescript|html|css|json|xml)$/.test(siblingText)) {
+                  sibling.classList.add('ui-control-ignore');
+                  debugLog('Marked UI control for ignoring:', siblingText);
+                }
+              }
+            }
+          }
+          return;
+        }
+      }
+      
+      // Special equation detection for KaTeX elements
+      if (el.classList.contains('katex')) {
+        const latex = el.getAttribute('data-latex');
+        if (latex) {
+          const normalized = normalizeEquation(latex.trim());
+          if (!extractedEquationContent.has(normalized)) {
+            items.push({ 
+              type: 'equation', 
+              content: latex.trim(), 
+              y: elementY
+            });
+            extractedEquationContent.add(normalized);
+            debugLog('KaTeX equation found:', latex);
+          } else {
+            debugLog('Skipping duplicate KaTeX equation:', latex);
+          }
+          return;
+        }
+      }
+      
+      // 2) Extract markdown/text-base paragraphs & lists, but skip if contains code
+      if (el.tagName === 'DIV' && (el.className.includes('markdown') || el.className.includes('text-base'))) {
+        // Skip elements that are UI controls or marked to be ignored
+        if (el.classList.contains('ui-control-ignore') || isUIControl(el.textContent)) {
+          debugLog('Skipping UI control element:', el.textContent);
+          return;
+        }
+        
+        // Instead of treating entire div as plain text, extract its structure properly
+        debugLog('Processing structured markdown container...');
+        
+        // Check for headings first (h1-h6)
+        el.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+          const txt = heading.innerText.trim();
+          if (txt) {
+            const headingY = elementY + heading.getBoundingClientRect().top - el.getBoundingClientRect().top;
+            items.push({ 
+              type: 'text', 
+              content: sanitizeTextForPDF(txt), 
+              y: headingY
+            });
+            debugLog('Heading:', txt);
           }
         });
         
-        // Extract math/equation elements
-        const mathElements = container.querySelectorAll('.katex, .katex-display');
-        mathElements.forEach(math => {
-          // Get the LaTeX source if available
-          const latex = math.querySelector('.katex-mathml annotation[encoding="application/x-tex"]');
+        // Extract paragraphs that aren't inside other elements we handle separately
+        const paragraphs = Array.from(el.querySelectorAll('p'))
+          .filter(p => !p.closest('pre, ol, ul'));
+        
+        paragraphs.forEach(p => {
+          const txt = p.innerText.trim();
+          if (txt) {
+            const paragraphY = elementY + p.getBoundingClientRect().top - el.getBoundingClientRect().top;
+            // Check if this paragraph is likely an equation
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt) ||
+              /\\frac/.test(txt) ||
+              /\\int/.test(txt) ||
+              /\\sum/.test(txt) ||
+              /\\sqrt/.test(txt) ||
+              /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+              /\\partial|\\nabla/.test(txt) ||
+              /^[•*]\s*F\s+is\s+.*force/.test(txt) ||
+              /^[•*]\s*p\s+is\s+.*momentum/.test(txt) ||
+              /^[•*]\s*=\s*p\s*=\s*m\s*v/.test(txt) ||
+              /^[•*]\s*Start\s+with\s+momentum/.test(txt) ||
+              /^[•*]\s*Differentiate\s+both\s+sides/.test(txt) ||
+              /^[•*]\s*Assuming\s+mass\s+m\s+is\s+constant/.test(txt) ||
+              /^[•*]\s*Since\s+.*=\s*dt\s+dv\s*=/.test(txt) ||
+              /^[•*]\s*Therefore/.test(txt) ||
+              /^[•*]\s*Newton/.test(txt)
+            ) {
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: paragraphY });
+                debugLog('Equation paragraph found:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: paragraphY });
+              debugLog('Paragraph:', txt);
+            }
+          }
+        });
+        
+        // Process lists and their items carefully
+        el.querySelectorAll('ol, ul').forEach(list => {
+          // Skip if already inside a processed list
+          if (list.closest('ol, ul') !== list) return;
+          
+          const listY = elementY + list.getBoundingClientRect().top - el.getBoundingClientRect().top;
+          
+          Array.from(list.querySelectorAll('li')).forEach((li, liIndex) => {
+            // Only process direct children of this list
+            if (li.closest('ol, ul') !== list) return;
+            
+            const txt = li.innerText.trim();
+            if (txt) {
+              // Calculate approximate y position for each list item
+              const listItemY = listY + (liIndex * 20); // Approximate line height
+              
+              // Check if this list item is likely an equation
+              if (
+                /F\s*=\s*m\s*a/.test(txt) ||
+                /E\s*=\s*m\s*c\^?2/.test(txt) ||
+                /p\s*=\s*m\s*v/.test(txt) ||
+                /dt\s+d[pv]/.test(txt) ||
+                /=\s*m\s*d[v]\/dt/.test(txt) ||
+                /\\frac/.test(txt) ||
+                /\\int/.test(txt) ||
+                /\\sum/.test(txt) ||
+                /\\sqrt/.test(txt) ||
+                /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+                /\\partial|\\nabla/.test(txt) ||
+                /^F\s+is\s+.*force/.test(txt) ||
+                /^p\s+is\s+.*momentum/.test(txt) ||
+                /^=\s*p\s*=\s*m\s*v/.test(txt) ||
+                /^Start\s+with\s+momentum/.test(txt) ||
+                /^Differentiate\s+both\s+sides/.test(txt) ||
+                /^Assuming\s+mass\s+m\s+is\s+constant/.test(txt) ||
+                /^Since\s+.*=\s*dt\s+dv\s*=/.test(txt) ||
+                /^Therefore/.test(txt) ||
+                /^Newton/.test(txt)
+              ) {
+                const normalized = normalizeEquation(txt);
+                if (!extractedEquationContent.has(normalized)) {
+                  items.push({ type: 'equation', content: txt, y: listItemY });
+                  debugLog('Equation list item found:', txt);
+                  extractedEquationContent.add(normalized);
+                } else {
+                  debugLog('Skipping duplicate equation:', txt);
+                }
+              } else {
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: listItemY });
+                debugLog('List item:', txt);
+              }
+            }
+          });
+        });
+        
+        // Find any loose text nodes or spans not in elements we've already processed
+        const directTextContainers = Array.from(el.querySelectorAll('div'))
+          .filter(div => {
+            // Skip divs that contain elements we handle separately
+            return !div.querySelector('pre, code, h1, h2, h3, h4, h5, h6, p, ol, ul, table');
+          });
+        
+        directTextContainers.forEach(container => {
+          const txt = container.innerText.trim();
+          if (txt) {
+            const containerY = elementY + container.getBoundingClientRect().top - el.getBoundingClientRect().top;
+            // Check if this container has equation-like content
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt) ||
+              /\\frac/.test(txt) ||
+              /\\int/.test(txt) ||
+              /\\sum/.test(txt) ||
+              /\\sqrt/.test(txt) ||
+              /\\alpha|\\beta|\\gamma|\\delta/.test(txt) ||
+              /\\partial|\\nabla/.test(txt)
+            ) {
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: containerY });
+                debugLog('Equation in direct container found:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: containerY });
+              debugLog('Direct text container:', txt);
+            }
+          }
+        });
+        
+        // Find all code blocks nested inside this markdown container
+        el.querySelectorAll('pre code').forEach(code => {
+          // Skip if we've already processed this PRE (parent) element
+          if (code.closest('pre').classList.contains('processed')) return;
+          
+          const pre = code.closest('pre');
+          pre.classList.add('processed');
+          const content = code.textContent.trim();
+          const language = getCodeLanguage(pre);
+          const codeY = elementY + pre.getBoundingClientRect().top - el.getBoundingClientRect().top;
+          items.push({ type: 'code', content, language, y: codeY, isCodeBlock: true });
+          debugLog('Nested code block found:', language, content);
+        });
+        
+        return;
+      }
+      try {
+        const tag = el.tagName;
+        if (/^H[1-6]$/.test(tag) || tag === 'P') {
+          const txt = el.innerText.trim();
+          if (txt) {
+            // Check if heading or paragraph is equation-like
+            if (
+              /F\s*=\s*m\s*a/.test(txt) ||
+              /E\s*=\s*m\s*c\^?2/.test(txt) ||
+              /p\s*=\s*m\s*v/.test(txt) ||
+              /dt\s+d[pv]/.test(txt) ||
+              /=\s*m\s*d[v]\/dt/.test(txt)
+            ) {
+              const normalized = normalizeEquation(txt);
+              if (!extractedEquationContent.has(normalized)) {
+                items.push({ type: 'equation', content: txt, y: elementY });
+                debugLog('Equation in heading/paragraph:', txt);
+                extractedEquationContent.add(normalized);
+              } else {
+                debugLog('Skipping duplicate equation:', txt);
+              }
+            } else {
+              items.push({ type: 'text', content: sanitizeTextForPDF(txt), y: elementY });
+              debugLog('Text:', txt);
+            }
+          }
+        } else if (tag === 'UL' || tag === 'OL') {
+          Array.from(el.children).forEach((li, idx) => {
+            const txt = li.innerText.trim();
+            if (txt) {
+              const liY = elementY + (idx * 20); // approximate y position for list items
+              // Check if list item is equation-like
+              if (
+                /F\s*=\s*m\s*a/.test(txt) ||
+                /E\s*=\s*m\s*c\^?2/.test(txt) ||
+                /p\s*=\s*m\s*v/.test(txt) ||
+                /dt\s+d[pv]/.test(txt) ||
+                /=\s*m\s*d[v]\/dt/.test(txt) ||
+                /F\s+is\s+.*force/.test(txt) ||
+                /p\s+is\s+.*momentum/.test(txt)
+              ) {
+                const normalized = normalizeEquation(txt);
+                if (!extractedEquationContent.has(normalized)) {
+                  items.push({ type: 'equation', content: txt, y: liY });
+                  debugLog('Equation in list item:', txt);
+                  extractedEquationContent.add(normalized);
+                } else {
+                  debugLog('Skipping duplicate equation:', txt);
+                }
+              } else {
+                items.push({ type: 'text', content: '• ' + sanitizeTextForPDF(txt), y: liY });
+                debugLog('List item:', txt);
+              }
+            }
+          });
+        } else if (tag === 'TABLE') {
+          try {
+            // More robust table extraction
+            debugLog('Found table element, extracting data...');
+            
+            // Extract headers - first look for thead/th elements
+            let headers = Array.from(el.querySelectorAll('thead th'))
+              .map(th => sanitizeTextForPDF(th.innerText.trim()))
+              .filter(h => h);
+            
+            // If no thead/th, try first row as header
+            if (headers.length === 0) {
+              const firstRow = el.querySelector('tr');
+              if (firstRow) {
+                headers = Array.from(firstRow.querySelectorAll('th, td'))
+                  .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+                  .filter(h => h);
+              }
+            }
+            
+            // Extract rows - skip first row if it was used as headers
+            const allRows = Array.from(el.querySelectorAll('tbody tr, tr')); 
+            const skipFirst = headers.length > 0 && !el.querySelector('thead') && allRows.length > 0;
+            const rowsToProcess = skipFirst ? allRows.slice(1) : allRows;
+            
+            const rows = rowsToProcess.map(tr =>
+              Array.from(tr.querySelectorAll('td'))
+                .map(td => sanitizeTextForPDF(td.innerText.trim()))
+            ).filter(row => row.length > 0 && row.some(cell => cell.trim() !== ''));
+            
+            if (headers.length > 0 || rows.length > 0) {
+              debugLog(`Table extracted: ${headers.length} headers, ${rows.length} rows`);
+              items.push({ 
+                type: 'table', 
+                headers, 
+                rows, 
+                y: elementY
+              });
+            } else {
+              debugLog('Empty table found - skipping');
+            }
+          } catch (tableError) {
+            console.warn('Error extracting table:', tableError);
+          }
+        } else if (tag === 'IMG') {
+          const src = el.src;
+          if (src) {
+            items.push({ type: 'image', content: src, y: elementY });
+            debugLog('Image:', src);
+          }
+        } else if (el.classList.contains('katex')) {
+          const latex = el.getAttribute('data-latex');
           if (latex) {
-            messageItems.push({
-              type: 'equation',
-              content: latex.textContent
-            });
+            const normalized = normalizeEquation(latex.trim());
+            if (!extractedEquationContent.has(normalized)) {
+              items.push({ type: 'equation', content: latex.trim(), y: elementY });
+              debugLog('KaTeX equation:', latex);
+              extractedEquationContent.add(normalized);
+            } else {
+              debugLog('Skipping duplicate equation:', latex);
+            }
           }
-          // Fallback to rendered text
-          else if (math.textContent) {
-            messageItems.push({
-              type: 'equation',
-              content: math.textContent
-            });
-          }
-        });
-      });
-      
-      // Add this message with all its parts
-      conversation.messages.push({
-        speaker: speaker,
-        items: messageItems
-      });
+        }
+      } catch (err) {
+        console.warn('Segment error:', err);
+      }
     });
     
-    return conversation;
+    // Look for div-based tables (ChatGPT often renders tables using divs)
+    const divTables = block.querySelectorAll('div[class*="table"], div[style*="grid"], div[style*="table"]');
+    divTables.forEach(tableDiv => {
+      try {
+        debugLog('Found potential div-based table structure');
+        
+        // For div-based tables, we need to determine the table structure
+        // Look for consistent patterns of child divs arranged in rows/columns
+        const rows = Array.from(tableDiv.children).filter(el => 
+          el.tagName === 'DIV' && 
+          (el.style.display === 'flex' || el.className.includes('row'))
+        );
+        
+        if (rows.length === 0) {
+          // Try different structure - look for direct children as rows
+          const childDivs = Array.from(tableDiv.children).filter(el => el.tagName === 'DIV');
+          if (childDivs.length >= 2 && // Need at least a header row and data row
+              childDivs[0].children.length > 1) { // Need at least 2 columns
+            debugLog('Found alternative div table structure');
+            
+            // Try to extract headers from first row
+            const headers = Array.from(childDivs[0].children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+              .filter(h => h);
+            
+            // Extract the rest as data rows
+            const dataRows = childDivs.slice(1).map(row => 
+              Array.from(row.children)
+                .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+            ).filter(row => row.length > 0);
+            
+            if (headers.length > 0 && dataRows.length > 0) {
+              debugLog(`Extracted div-table: ${headers.length} headers, ${dataRows.length} rows`);
+              items.push({
+                type: 'table',
+                headers,
+                rows: dataRows,
+                y: tableDiv.getBoundingClientRect().top
+              });
+            }
+          }
+          return;
+        }
+        
+        // Try to determine if first row is header
+        const firstRow = rows[0];
+        const otherRows = rows.slice(1);
+        
+        // Check if first row has different styling (often indicates header)
+        const isHeader = firstRow.classList.contains('header') || 
+                         firstRow.style.fontWeight === 'bold' ||
+                         firstRow.querySelector('strong, b') ||
+                         firstRow.style.backgroundColor !== (otherRows[0]?.style.backgroundColor);
+        
+        let headers = [];
+        let dataRows = [];
+        
+        if (isHeader) {
+          // Extract headers from first row
+          headers = Array.from(firstRow.children)
+            .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+            .filter(h => h);
+            
+          // Extract data from other rows
+          dataRows = otherRows.map(row => 
+            Array.from(row.children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+          ).filter(row => row.length > 0);
+        } else {
+          // No clear header, use all rows as data
+          dataRows = rows.map(row => 
+            Array.from(row.children)
+              .map(cell => sanitizeTextForPDF(cell.innerText.trim()))
+          ).filter(row => row.length > 0);
+          
+          // If we have data, use first row values as headers too
+          if (dataRows.length > 0) {
+            headers = [...dataRows[0]];
+          }
+        }
+        
+        if (headers.length > 0 && dataRows.length > 0) {
+          debugLog(`Extracted div table: ${headers.length} headers, ${dataRows.length} rows`);
+          items.push({
+            type: 'table',
+            headers,
+            rows: dataRows,
+            y: tableDiv.getBoundingClientRect().top
+          });
+        }
+      } catch (divTableError) {
+        console.warn('Error processing div-based table:', divTableError);
+      }
+    });
+    
+    if (items.length > 0) {
+      // Sort items by y-coordinate to ensure correct visual order
+      items.sort((a, b) => (a.y || 0) - (b.y || 0));
+      
+      debugLog(`Sorted ${items.length} items by visual position`);
+      conversationData.messages.push({ speaker, timestamp, items });
+      debugLog(`Added ${speaker} message with ${items.length} items`);
+    }
   } catch (error) {
-    console.error("Error extracting conversation:", error);
-    return { error: error.toString() };
+    debugLog(`Error processing message block ${index}:`, error);
   }
-} 
+
+  // Make sure items is defined before trying to use it
+  if (typeof items === 'undefined') {
+    debugLog(`No items array defined in message block ${index} - skipping markdown table processing`);
+    return;
+  }
+
+  // Extra check for potential markdown tables in text items
+  const markdownTablePattern = /\|\s*[^|]+\s*\|\s*[^|]+\s*\|/;
+  const markdownTableHeaderPattern = /\|\s*[-:]+\s*\|\s*[-:]+\s*\|/;
+
+  const potentialMarkdownTables = items.filter(item => 
+    item.type === 'text' && 
+    markdownTablePattern.test(item.content) &&
+    item.content.includes('\n') &&
+    item.content.split('\n').length >= 3
+  );
+
+  potentialMarkdownTables.forEach(item => {
+    try {
+      debugLog('Found potential markdown table in text:', item.content);
+      
+      // Split into lines and process
+      const lines = item.content.split('\n')
+        .map(line => line.trim())
+        .filter(line => line && markdownTablePattern.test(line));
+      
+      // Need at least header row, separator row, and one data row
+      if (lines.length >= 3) {
+        // Extract headers from first row
+        const headerLine = lines[0];
+        const headers = headerLine.split('|')
+          .map(cell => cell.trim())
+          .filter(cell => cell);
+        
+        // Skip separator row (second line)
+        
+        // Extract data rows (third line onwards)
+        const rows = lines.slice(2).map(line => 
+          line.split('|')
+            .map(cell => cell.trim())
+            .filter(cell => cell)
+        );
+        
+        // Only process if we have valid headers and rows
+        if (headers.length > 0 && rows.length > 0) {
+          debugLog(`Extracted markdown table: ${headers.length} headers, ${rows.length} rows`);
+          
+          // Remove the text item and replace with table
+          const index = items.indexOf(item);
+          if (index !== -1) {
+            items.splice(index, 1, {
+              type: 'table',
+              headers,
+              rows,
+              y: item.y || 0
+            });
+            debugLog('Converted text to table item');
+          }
+        }
+      }
+    } catch (mdTableError) {
+      console.warn('Error processing markdown table:', mdTableError);
+    }
+  });
+}
+
+// Add this to help with debugging
+function logDOMStructure() {
+  debugLog('=== DOM Structure Analysis ===');
+  
+  const mainContainer = document.querySelector('div[class*="react-scroll-to-bottom"]');
+  debugLog('Main container found:', !!mainContainer);
+  
+  if (mainContainer) {
+    const messageGroups = mainContainer.querySelectorAll('div[class*="group w-full"]');
+    debugLog('Message groups found:', messageGroups.length);
+    
+    const textElements = mainContainer.querySelectorAll('div[class*="markdown"]');
+    debugLog('Text elements found:', textElements.length);
+    
+    const codeBlocks = mainContainer.querySelectorAll('pre code');
+    debugLog('Code blocks found:', codeBlocks.length);
+  }
+  
+  debugLog('=== End DOM Analysis ===');
+}
+
+// Call this when initializing
+document.addEventListener('DOMContentLoaded', () => {
+  debugLog('Content script initializing...');
+  logDOMStructure();
+}); 

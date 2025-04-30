@@ -2,69 +2,232 @@
 <html>
 <head>
   <title>ChatGPT to PDF Converter</title>
+  <meta charset="UTF-8">
+  <!-- Add KaTeX CSS -->
+  <link rel="stylesheet" href="lib/katex.min.css">
+  <!-- Add KaTeX JS -->
+  <script src="lib/katex.min.js"></script>
+  <!-- Add RasterizeHTML for better equation rendering -->
+  <script src="lib/rasterizeHTML.js"></script>
   <style>
     body {
-      width: 300px;
-      padding: 15px;
+      width: 350px;
       font-family: Arial, sans-serif;
+      padding: 15px;
+      margin: 0;
+      color: #333;
     }
-    .container {
+    
+    .header {
       display: flex;
-      flex-direction: column;
       align-items: center;
+      justify-content: space-between;
+      margin-bottom: 15px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
     }
-    h1 {
+    
+    .title {
       font-size: 18px;
-      text-align: center;
+      font-weight: bold;
+      margin: 0;
+    }
+    
+    .tag {
+      font-size: 11px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+    
+    .free {
+      background-color: #e3f2fd;
+      color: #0d47a1;
+    }
+    
+    .premium {
+      background-color: #fff8e1;
+      color: #ff6f00;
+    }
+    
+    #version {
+      font-size: 11px;
+      color: #777;
+    }
+    
+    .main-content {
       margin-bottom: 15px;
     }
+    
     button {
-      padding: 10px 15px;
-      background-color: #4CAF50;
+      background-color: #10a37f;
       color: white;
       border: none;
+      padding: 10px 15px;
+      font-size: 14px;
       border-radius: 4px;
       cursor: pointer;
-      margin-bottom: 15px;
+      width: 100%;
+      margin-bottom: 10px;
     }
+    
     button:hover {
-      background-color: #45a049;
+      background-color: #0d8c6c;
     }
+    
     button:disabled {
-      background-color: #cccccc;
+      background-color: #ccc;
       cursor: not-allowed;
     }
-    .export-counter {
-      display: none;
-      font-size: 14px;
-      color: #666;
+    
+    #status, #errorMessage {
       margin-top: 10px;
+      font-size: 13px;
     }
+    
+    #status {
+      color: #10a37f;
+      display: none;
+    }
+    
+    #errorMessage {
+      color: #e53935;
+      display: none;
+    }
+    
+    #exportCounter {
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 10px;
+      display: none;
+    }
+    
     .features {
       font-size: 12px;
-      color: #666;
+      margin-top: 15px;
+      background-color: #f7f7f7;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    
+    .features h3 {
+      margin-top: 0;
+      font-size: 14px;
+    }
+    
+    .features ul {
+      padding-left: 20px;
+      margin: 5px 0;
+    }
+    
+    .features li {
+      margin-bottom: 4px;
+    }
+    
+    .premium-prompt {
+      font-size: 13px;
+      margin-top: 15px;
+      text-align: center;
+      background-color: #fff8e1;
+      padding: 8px;
+      border-radius: 4px;
+    }
+    
+    #upgradePremium {
+      background-color: #ff6f00;
       margin-top: 5px;
+      font-size: 13px;
+      padding: 8px;
+    }
+    
+    .footer {
+      font-size: 11px;
+      color: #777;
+      border-top: 1px solid #eee;
+      margin-top: 15px;
+      padding-top: 10px;
       text-align: center;
     }
-    .error {
-      color: #f44336;
-      font-size: 14px;
+    
+    #helpButton {
+      background: none;
+      border: none;
+      color: #777;
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0;
+      width: auto;
+    }
+    
+    #helpContent {
+      display: none;
+      font-size: 12px;
       margin-top: 10px;
-      text-align: center;
+      padding: 10px;
+      background-color: #f5f5f5;
+      border-radius: 4px;
+    }
+    
+    /* Hidden container for KaTeX rendering */
+    #katex-container {
+      position: absolute;
+      visibility: hidden;
+      width: 500px;
+      height: 0;
+      overflow: hidden;
     }
   </style>
-  <script src="jspdf.umd.min.js"></script>
-  <script src="jspdf.plugin.autotable.min.js"></script>
 </head>
 <body>
-  <div class="container">
-    <h1>ChatGPT to PDF Converter</h1>
-    <button id="generatePdf">Generate PDF</button>
-    <button id="testImages" style="background-color: #ff9800;">Test Images</button>
-    <div class="export-counter" id="exportCounter">Loading...</div>
-    <div class="features">Includes images, equations, tables</div>
-    <div class="error" id="errorMessage"></div>
+  <div class="header">
+    <h1 class="title">ChatGPT to PDF</h1>
+    <span id="premiumTag" class="tag free">FREE</span>
   </div>
+  
+  <div class="main-content">
+    <button id="generatePdf">Generate PDF</button>
+    <div id="exportCounter">0/5 exports used today</div>
+    <div id="status"></div>
+    <div id="errorMessage"></div>
+  </div>
+  
+  <div class="features">
+    <h3>Features <button id="helpButton"><i class="fas fa-question-circle"></i></button></h3>
+    <ul id="featuresList">
+      <!-- Populated by popup-ui.js -->
+    </ul>
+    
+    <div id="helpContent">
+      <p>This extension converts your ChatGPT conversations to PDF files. The free version is limited to 5 exports per day.</p>
+      <p>To export:</p>
+      <ol>
+        <li>Open a ChatGPT conversation</li>
+        <li>Click "Generate PDF"</li>
+        <li>Wait for the PDF to download</li>
+      </ol>
+      <p>For best results, scroll through your entire conversation first so all content is loaded.</p>
+    </div>
+  </div>
+  
+  <div class="premium-prompt">
+    Upgrade for unlimited exports and formatted equations/emojis!
+    <button id="upgradePremium">Upgrade to Premium</button>
+  </div>
+  
+  <div class="footer">
+    <span id="version">v1.0</span> | 
+    <a href="#" id="privacyLink">Privacy Policy</a> | 
+    <a href="#" id="tosLink">Terms of Service</a>
+  </div>
+  
+  <!-- Hidden container for KaTeX rendering -->
+  <div id="katex-container"></div>
+  
+  <!-- Load scripts -->
+  <script src="jspdf.umd.min.js"></script>
+  <script src="jspdf.plugin.autotable.min.js"></script>
+  <script src="library-check.js"></script>
+  <script src="popup-ui.js"></script>
   <script src="popup.js"></script>
 </body>
 </html> 
