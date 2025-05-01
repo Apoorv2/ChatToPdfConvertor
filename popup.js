@@ -199,8 +199,16 @@ function initializeApp() {
       const processedMessages = processMessagesForPDF(rawMessages);
       console.log(`Preparing to render ${processedMessages.length} messages`);
       
+      // Filter out user messages if the checkbox is checked
+      const excludeUserMessages = document.getElementById('excludeUserMessages').checked;
+      const messagesToRender = excludeUserMessages 
+        ? processedMessages.filter(msg => msg.speaker !== 'User')
+        : processedMessages;
+      
+      console.log(`Messages to render: ${messagesToRender.length} (filtered user messages: ${excludeUserMessages})`);
+      
       // Clean any "You said:" or "ChatGPT said:" from message content
-      processedMessages.forEach(message => {
+      messagesToRender.forEach(message => {
         if (message.items && Array.isArray(message.items)) {
           message.items.forEach(item => {
             if (item.type === 'text' && item.content) {
@@ -303,10 +311,10 @@ function initializeApp() {
       let yPosition = 45;
       
       // Render each message
-      console.log(`Rendering ${processedMessages.length} messages`);
+      console.log(`Rendering ${messagesToRender.length} messages`);
       
-      for (let i = 0; i < processedMessages.length; i++) {
-        console.log(`-- Rendering message #${i+1}: speaker=${processedMessages[i].speaker}, items=${processedMessages[i].items.length}`);
+      for (let i = 0; i < messagesToRender.length; i++) {
+        console.log(`-- Rendering message #${i+1}: speaker=${messagesToRender[i].speaker}, items=${messagesToRender[i].items.length}`);
         // Break page if we exceed bottom margin
         if (yPosition > pageHeight - bottomMargin) {
           console.log(`-- Page break: yPosition (${yPosition}) > pageHeight - bottomMargin (${pageHeight} - ${bottomMargin})`);
@@ -315,9 +323,9 @@ function initializeApp() {
         }
         
         // Render the message
-        yPosition = await renderMessage(doc, processedMessages[i], yPosition, pageWidth - 2 * margin);
+        yPosition = await renderMessage(doc, messagesToRender[i], yPosition, pageWidth - 2 * margin);
         
-        console.log(`Rendered message ${i+1}/${processedMessages.length}, new Y: ${yPosition}`);
+        console.log(`Rendered message ${i+1}/${messagesToRender.length}, new Y: ${yPosition}`);
       }
       
       // Save PDF and show download link
